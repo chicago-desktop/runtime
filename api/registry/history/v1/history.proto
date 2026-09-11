@@ -2,20 +2,17 @@ syntax = "proto3";
 package wippy.registry.history.v1;
 option go_package = "github.com/wippyai/runtime/api/registry/history/v1;historyv1";
 message RegistryKey { string tenant_id = 1; string environment_id = 2; string registry_id = 3; }
-message Dot { string actor = 1; uint64 counter = 2; }
 message Mutation { string entry_id = 1; bytes value = 2; bool deleted = 3; }
-message SubmitRequest { RegistryKey key = 1; string request_id = 2; Dot dot = 3; repeated Dot context = 4; repeated Mutation mutations = 5; bytes resolution = 6; }
+message SubmitRequest { reserved 3, 4; RegistryKey key = 1; string request_id = 2; repeated Mutation mutations = 5; bytes resolution = 6; optional uint64 expected_revision = 7; }
 message Receipt { string request_id = 1; uint64 revision = 2; string status = 3; string message = 4; uint64 published_revision = 5; }
 message SubmitResponse { Receipt receipt = 1; }
 message GetReceiptRequest { RegistryKey key = 1; string request_id = 2; }
 message GetRequest { RegistryKey key = 1; uint64 revision = 2; bool exact = 3; }
 message ReadRequest { RegistryKey key = 1; uint64 after_revision = 2; uint32 limit = 3; }
-message Value { Dot dot = 1; bytes value = 2; bool deleted = 3; }
-message Entry { string entry_id = 1; repeated Value values = 2; }
-message Candidate { uint64 revision = 1; repeated Entry entries = 2; repeated Dot context = 3; bytes resolution = 4; string status = 5; }
-message Version { uint64 revision = 1; uint64 parent_revision = 2; repeated Mutation entries = 3; bytes resolution = 4; repeated Dot context = 5; bytes legacy_changeset = 6; }
+message Candidate { reserved 2, 3; uint64 revision = 1; bytes resolution = 4; string status = 5; repeated Mutation mutations = 6; }
+message Version { reserved 5; uint64 revision = 1; uint64 parent_revision = 2; repeated Mutation entries = 3; bytes resolution = 4; bytes legacy_changeset = 6; }
 message ListResponse { repeated Receipt receipts = 1; uint64 next_revision = 2; }
-message RestoreRequest { RegistryKey key = 1; string request_id = 2; Dot dot = 3; repeated Dot context = 4; uint64 target_revision = 5; }
+message RestoreRequest { reserved 3, 4; RegistryKey key = 1; string request_id = 2; uint64 target_revision = 5; optional uint64 expected_revision = 6; }
 message AppliedRequest { RegistryKey key = 1; string replica_id = 2; uint64 revision = 3; string error = 4; }
 message VersionMeta { uint64 revision = 1; uint64 parent_revision = 2; }
 message VersionList { repeated VersionMeta versions = 1; uint64 next_revision = 2; bool has_more = 3; }

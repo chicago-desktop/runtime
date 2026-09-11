@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"sync"
 	"time"
 
@@ -44,18 +43,15 @@ type History struct {
 	closer          io.Closer
 	client          historyv1.HistoryServiceClient
 	replicaID       string
-	actor           string
-	causal          []*historyv1.Dot
 	timeout         time.Duration
 	pollInterval    time.Duration
 	maxMessageBytes int
-	counter         uint64
-	applied         uint64
+	revision        uint64
+	appliedRevision uint64
 	reported        uint64
 	mu              sync.Mutex
 	reportMu        sync.Mutex
 	legacyMu        sync.Mutex
-	actorReady      bool
 }
 
 var _ registry.PublishedHistory = (*History)(nil)
@@ -73,7 +69,7 @@ func New(connection grpc.ClientConnInterface, cfg Config) (*History, error) {
 	if cfg.MaxMessageBytes < 0 {
 		return nil, errors.New("history message size must be positive")
 	}
-	return &History{client: historyv1.NewHistoryServiceClient(connection), key: proto.Clone(cfg.Key).(*historyv1.RegistryKey), replicaID: cfg.ReplicaID, actor: cfg.ReplicaID, timeout: cfg.Timeout, pollInterval: cfg.PollInterval, maxMessageBytes: cfg.MaxMessageBytes}, nil
+	return &History{client: historyv1.NewHistoryServiceClient(connection), key: proto.Clone(cfg.Key).(*historyv1.RegistryKey), replicaID: cfg.ReplicaID, timeout: cfg.Timeout, pollInterval: cfg.PollInterval, maxMessageBytes: cfg.MaxMessageBytes}, nil
 }
 
 func (h *History) SubmitChanges(ctx context.Context, changes registry.ChangeSet, resolution *registry.DependencyResolution) (*registry.HistoryReceipt, error) {
@@ -119,23 +115,30 @@ func (h *History) SubmitChanges(ctx context.Context, changes registry.ChangeSet,
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.pendingRestore != nil {
-		return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, h.pendingRestore.RequestId)
+		h.reconcilePendingLocked(ctx)
+		if h.pendingRestore != nil {
+			return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, h.pendingRestore.RequestId)
+		}
 	}
 	req := &historyv1.SubmitRequest{Mutations: mutations, Resolution: graph}
 	if h.pending != nil {
 		previous := &historyv1.SubmitRequest{Mutations: h.pending.Mutations, Resolution: h.pending.Resolution}
-		if !proto.Equal(previous, req) {
+		matches := proto.Equal(previous, req)
+		if receipt := h.reconcilePendingLocked(ctx); receipt != nil && matches {
+			return convertReceipt(receipt), nil
+		}
+		if h.pending != nil && !matches {
 			return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, h.pending.RequestId)
 		}
-		req = h.pending
-	} else {
-		if err := h.initializeActor(ctx); err != nil {
-			return nil, err
+		if h.pending != nil {
+			req = h.pending
 		}
+	}
+	if h.pending == nil {
+		expectedRevision := h.revision
 		req.Key = h.key
 		req.RequestId = uuid.NewString()
-		req.Dot = &historyv1.Dot{Actor: h.actor, Counter: h.counter + 1}
-		req.Context = h.requestContext()
+		req.ExpectedRevision = &expectedRevision
 		if proto.Size(req) > h.maxMessageBytes {
 			return nil, errors.New("changes exceed the message size limit")
 		}
@@ -145,6 +148,10 @@ func (h *History) SubmitChanges(ctx context.Context, changes registry.ChangeSet,
 	result, err := h.client.Submit(callCtx, req, grpc.MaxCallSendMsgSize(h.maxMessageBytes))
 	cancel()
 	if err != nil {
+		if status.Code(err) == codes.Aborted {
+			h.pending = nil
+			return nil, fmt.Errorf("%w: %s: %w", registry.ErrHistoryConflict, req.RequestId, err)
+		}
 		if !retryable(err) {
 			h.pending = nil
 			return nil, err
@@ -155,14 +162,17 @@ func (h *History) SubmitChanges(ctx context.Context, changes registry.ChangeSet,
 		if receiptErr != nil {
 			return nil, fmt.Errorf("%w: %s: %w", ErrCommitUnknown, req.RequestId, errors.Join(err, receiptErr))
 		}
-		h.counter = req.Dot.Counter
+		if receipt == nil {
+			return nil, fmt.Errorf("%w: %s: empty receipt", ErrCommitUnknown, req.RequestId)
+		}
+		h.revision = max(h.revision, receipt.Revision)
 		h.pending = nil
 		return convertReceipt(receipt), nil
 	}
 	if result.GetReceipt() == nil {
 		return nil, fmt.Errorf("%w: %s: empty receipt", ErrCommitUnknown, req.RequestId)
 	}
-	h.counter = req.Dot.Counter
+	h.revision = max(h.revision, result.Receipt.Revision)
 	h.pending = nil
 	return convertReceipt(result.Receipt), nil
 }
@@ -216,24 +226,35 @@ func (h *History) RestoreChanges(ctx context.Context, revision uint64) (*registr
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.pending != nil {
-		return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, h.pending.RequestId)
+		h.reconcilePendingLocked(ctx)
+		if h.pending != nil {
+			return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, h.pending.RequestId)
+		}
 	}
 	request := h.pendingRestore
 	if request != nil {
-		if request.TargetRevision != revision {
+		matches := request.TargetRevision == revision
+		if receipt := h.reconcilePendingLocked(ctx); receipt != nil && matches {
+			return convertReceipt(receipt), nil
+		}
+		request = h.pendingRestore
+		if request != nil && !matches {
 			return nil, fmt.Errorf("%w: %s", ErrCommitUnknown, request.RequestId)
 		}
-	} else {
-		if err := h.initializeActor(ctx); err != nil {
-			return nil, err
-		}
-		request = &historyv1.RestoreRequest{Key: h.key, RequestId: uuid.NewString(), Dot: &historyv1.Dot{Actor: h.actor, Counter: h.counter + 1}, Context: h.requestContext(), TargetRevision: revision}
+	}
+	if request == nil {
+		expectedRevision := h.revision
+		request = &historyv1.RestoreRequest{Key: h.key, RequestId: uuid.NewString(), TargetRevision: revision, ExpectedRevision: &expectedRevision}
 		h.pendingRestore = request
 	}
 	callCtx, cancel := context.WithTimeout(ctx, h.timeout)
 	result, err := h.client.Restore(callCtx, request)
 	cancel()
 	if err != nil {
+		if status.Code(err) == codes.Aborted {
+			h.pendingRestore = nil
+			return nil, fmt.Errorf("%w: restore request %s: %w", registry.ErrHistoryConflict, request.RequestId, err)
+		}
 		if !retryable(err) {
 			h.pendingRestore = nil
 			return nil, err
@@ -244,58 +265,19 @@ func (h *History) RestoreChanges(ctx context.Context, revision uint64) (*registr
 		if receiptErr != nil {
 			return nil, fmt.Errorf("%w: restore request %s: %w", ErrCommitUnknown, request.RequestId, errors.Join(err, receiptErr))
 		}
-		h.counter = request.Dot.Counter
+		if receipt == nil {
+			return nil, fmt.Errorf("%w: restore request %s: empty receipt", ErrCommitUnknown, request.RequestId)
+		}
+		h.revision = max(h.revision, receipt.Revision)
 		h.pendingRestore = nil
 		return convertReceipt(receipt), nil
 	}
 	if result.GetReceipt() == nil {
 		return nil, fmt.Errorf("%w: %s: empty restore receipt", ErrCommitUnknown, request.RequestId)
 	}
-	h.counter = request.Dot.Counter
+	h.revision = max(h.revision, result.GetReceipt().Revision)
 	h.pendingRestore = nil
 	return convertReceipt(result.GetReceipt()), nil
-}
-
-func (h *History) initializeActor(ctx context.Context) error {
-	if !h.actorReady {
-		callCtx, cancel := context.WithTimeout(ctx, h.timeout)
-		candidate, err := h.client.GetCandidate(callCtx, &historyv1.GetRequest{Key: h.key}, grpc.MaxCallRecvMsgSize(h.maxMessageBytes))
-		cancel()
-		if err != nil && status.Code(err) != codes.NotFound {
-			return err
-		}
-		if err == nil && candidate == nil {
-			return errors.New("empty history candidate response")
-		}
-		for _, dot := range candidate.GetContext() {
-			if dot.GetActor() == h.actor {
-				h.counter = max(h.counter, dot.GetCounter())
-			}
-		}
-		h.actorReady = true
-	}
-	if h.counter >= math.MaxInt64 {
-		return errors.New("history replica counter is exhausted")
-	}
-	return nil
-}
-
-func (h *History) requestContext() []*historyv1.Dot {
-	if h.counter == 0 {
-		return h.causal
-	}
-	for _, dot := range h.causal {
-		if dot.Actor == h.actor && dot.Counter == h.counter {
-			return h.causal
-		}
-	}
-	result := make([]*historyv1.Dot, 0, len(h.causal)+1)
-	for _, dot := range h.causal {
-		if dot.Actor != h.actor {
-			result = append(result, dot)
-		}
-	}
-	return append(result, &historyv1.Dot{Actor: h.actor, Counter: h.counter})
 }
 
 func (h *History) FollowPublished(ctx context.Context, after uint64, apply func(*registry.PublishedState) error) error {
@@ -356,14 +338,13 @@ func (h *History) ReportApplied(ctx context.Context, published *registry.Publish
 	revision := uint64(published.Version.ID())
 	if applicationErr == nil {
 		h.mu.Lock()
-		if revision >= h.applied {
-			h.causal = make([]*historyv1.Dot, len(published.Context))
-			for i, dot := range published.Context {
-				h.causal[i] = &historyv1.Dot{Actor: dot.Actor, Counter: dot.Counter}
-			}
-			h.applied = revision
-		}
+		h.revision = max(h.revision, revision)
+		h.appliedRevision = max(h.appliedRevision, revision)
+		hasPending := h.pending != nil || h.pendingRestore != nil
 		h.mu.Unlock()
+		if hasPending {
+			h.reconcilePending(ctx)
+		}
 	}
 	request := &historyv1.AppliedRequest{Key: h.key, ReplicaId: h.replicaID, Revision: revision}
 	if applicationErr != nil {
@@ -378,6 +359,40 @@ func (h *History) ReportApplied(ctx context.Context, published *registry.Publish
 		h.pendingReport = request
 	}
 	return h.flushAppliedLocked(ctx)
+}
+
+func (h *History) reconcilePending(ctx context.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reconcilePendingLocked(ctx)
+}
+
+func (h *History) reconcilePendingLocked(ctx context.Context) *historyv1.Receipt {
+	if h.appliedRevision == 0 {
+		return nil
+	}
+	var requestID string
+	if h.pending != nil {
+		requestID = h.pending.RequestId
+	} else if h.pendingRestore != nil {
+		requestID = h.pendingRestore.RequestId
+	} else {
+		return nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, h.timeout)
+	receipt, err := h.client.GetReceipt(callCtx, &historyv1.GetReceiptRequest{Key: h.key, RequestId: requestID})
+	cancel()
+	if err != nil || receipt == nil || receipt.RequestId != requestID || receipt.Status != "published" || receipt.PublishedRevision == 0 || receipt.PublishedRevision > h.appliedRevision {
+		return nil
+	}
+	h.revision = max(h.revision, receipt.Revision, receipt.PublishedRevision)
+	if h.pending != nil && h.pending.RequestId == requestID {
+		h.pending = nil
+	}
+	if h.pendingRestore != nil && h.pendingRestore.RequestId == requestID {
+		h.pendingRestore = nil
+	}
+	return receipt
 }
 
 func (h *History) flushApplied(ctx context.Context) error {
@@ -404,7 +419,7 @@ func decodeVersion(value *historyv1.Version) (*registry.PublishedState, error) {
 	if value == nil || uint64(uint(value.Revision)) != value.Revision {
 		return nil, errors.New("invalid published version")
 	}
-	published := &registry.PublishedState{Version: version.New(uint(value.Revision)), Changes: make(registry.ChangeSet, len(value.Entries)), Context: make([]registry.HistoryDot, len(value.Context))}
+	published := &registry.PublishedState{Version: version.New(uint(value.Revision)), Changes: make(registry.ChangeSet, len(value.Entries))}
 	seen := make(map[registry.ID]struct{}, len(value.Entries))
 	for i, mutation := range value.Entries {
 		if mutation == nil {
@@ -441,12 +456,6 @@ func decodeVersion(value *historyv1.Version) (*registry.PublishedState, error) {
 		if !published.Resolution.Valid() {
 			return nil, registry.ErrInvalidDependencyResolution
 		}
-	}
-	for i, dot := range value.Context {
-		if dot.GetActor() == "" || dot.GetCounter() == 0 {
-			return nil, errors.New("invalid published causal context")
-		}
-		published.Context[i] = registry.HistoryDot{Actor: dot.Actor, Counter: dot.Counter}
 	}
 	return published, nil
 }

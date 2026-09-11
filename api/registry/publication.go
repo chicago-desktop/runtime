@@ -17,16 +17,10 @@ type HistoryReceipt struct {
 	PublishedRevision uint64
 }
 
-type HistoryDot struct {
-	Actor   string
-	Counter uint64
-}
-
 type PublishedState struct {
 	Version    Version
-	Changes    ChangeSet
 	Resolution *DependencyResolution
-	Context    []HistoryDot
+	Changes    ChangeSet
 }
 
 type PublishedHistory interface {
