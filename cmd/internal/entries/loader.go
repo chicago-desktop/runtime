@@ -46,12 +46,22 @@ func LoadFromLockFile(ctx context.Context, logger *zap.Logger) error {
 		}
 		sources := moduleapi.GetSourceRegistry(ctx)
 		if sources == nil {
-			logger.Info("no deployment sources found, starting with empty registry")
+			logger.Info("no deployment sources found, restoring configured history")
+			if reg := regapi.GetRegistry(ctx); reg != nil {
+				if _, ok := reg.History().(regapi.PublishedHistory); ok {
+					return LoadEntriesToRegistry(ctx, nil, logger)
+				}
+			}
 			return nil
 		}
 		modulePaths := moduleLoadPathsFromSources(sources.Snapshot())
 		if len(modulePaths) == 0 {
-			logger.Info("no deployment sources found, starting with empty registry")
+			logger.Info("no deployment sources found, restoring configured history")
+			if reg := regapi.GetRegistry(ctx); reg != nil {
+				if _, ok := reg.History().(regapi.PublishedHistory); ok {
+					return LoadEntriesToRegistry(ctx, nil, logger)
+				}
+			}
 			return nil
 		}
 		configureSourceLoader(sources, logger)

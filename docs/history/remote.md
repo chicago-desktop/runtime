@@ -1,0 +1,45 @@
+# Remote registry history
+
+Use `wippy run --set registry.history_type=grpc` to select the remote service. Set each option with a separate `--set` argument.
+
+| Option | Source |
+| --- | --- |
+| `registry.history_endpoint` | Required service address. |
+| `registry.history_tenant_id` | Required tenant identity. |
+| `registry.history_environment_id` | Required environment identity. |
+| `registry.history_registry_id` | Required registry identity. |
+| `registry.history_replica_id` | Required replica identity. |
+| `registry.history_token_file` | Required file with a scoped bearer token. |
+| `registry.history_ca_file` | Service CA file. The system trust store applies when this option is empty. |
+| `registry.history_server_name` | TLS server name. The connection target supplies the name when this option is empty. |
+| `registry.history_cert_file` | Optional client certificate for mutual TLS. |
+| `registry.history_key_file` | Client key. Set this option with the client certificate. |
+| `registry.history_timeout` | Required positive request timeout. Select it from network and failover tests. |
+| `registry.history_poll_interval` | Required positive receipt poll interval. Select it from publication latency and request load tests. |
+| `registry.history_max_message_bytes` | Message limit. The default is the gRPC Go receive limit. Set it to the measured service limit. |
+
+The gRPC Go receive default is 4 MiB. See the [gRPC Go source](https://github.com/grpc/grpc-go/blob/v1.83.2/clientconn.go). The entry codec uses the same upper limit. MessagePack supplies the decoder depth and initial allocation limits. See the [MessagePack decoder source](https://github.com/hashicorp/go-msgpack/blob/v2.1.5/codec/decode.go). Stream reconnection uses the [gRPC backoff configuration](https://github.com/grpc/grpc-go/blob/v1.83.2/backoff/backoff.go). These library defaults are protocol limits. They are not measured capacity targets.
+
+A registry snapshot must fit in one response. Measure its protobuf size before migration. Configure the client and service to use the same tested limit. The service can store many separate registries. This protocol does not split one snapshot into message chunks.
+
+Use one stable `registry.history_replica_id` for each runtime replica. Only one live process can write with that identity. Keep the identity after a restart. The first write reads the stored actor counter. Later writes do not repeat this read. A lost response does not reset the counter. A second live process with the same identity can receive a counter error. Stop the duplicate process before restart. Do not retry that error with a different request ID. New replica identities consume new service actor slots. Routine restarts and stream reconnects reuse the existing slot.
+
+The runtime confirms local application only after the service publishes a version. A stored receipt can remain pending while Temporal is unavailable. A conflict or rejected graph leaves the last applied version active. The client resolves a lost commit response with the original request ID. It retains an unknown request for a retry with the same data.
+
+The first native publication stores the local baseline. Later startup uses only the published snapshot. A different local baseline does not change that snapshot. Submissions include expanded module entries and the exact dependency graph. Stored entry values and deletion records take precedence over artifact defaults.
+
+An imported snapshot must contain each entry required by its stored graph, or an explicit deletion record. The runtime rejects a snapshot if dependency reconciliation needs an entry that the snapshot does not contain. It reports the application error and retains the previous local version. Legacy histories that omit derived module entries require durable materialization before migration can complete.
+
+The runtime loads a full published snapshot after a restart. It does not require a local registry database. A missing lockfile does not prevent the remote read. A stored deployment graph lets the existing dependency loader retrieve the exact module artifacts. Local overlays remain process-local.
+
+`ApplyVersion` submits a restore change. It does not move the service head to an old version. Legacy reads support exact root versions, imported branches, and original entries. Imported versions retain the original operation order and updates that do not change a value. A cached baseline decoder restores released ownership metadata. Native versions return the effective changes between snapshots. Version enumeration reads metadata pages. It uses memory in proportion to the number of versions. Publication and startup do not enumerate version history.
+
+Export the immutable deployment baseline before migration:
+
+```sh
+wippy registry export-history-baseline --lock-file wippy.lock > baseline.json
+```
+
+Use the same `--profile` and `--set` options as the deployed runtime. The export uses the existing module entry loader. It preserves entry ownership and root metadata. If the baseline has authored dependency roots, supply `--resolution-file resolution.json`. This file must contain the exact `DependencyResolution` JSON for that baseline. The exporter checks the declarations and graph digest. It does not select new module versions. The output is a Version protobuf JSON document with revision zero. The importer must verify it against the source history and the configured size limit.
+
+Run remote recovery checks with the `historyintegration` build tag. This check requires an actual service, PostgreSQL, and Temporal. Set the `WIPPY_HISTORY_RECOVERY_*` variables from the test service configuration. The check starts independent writer and reader processes in separate empty directories. Test fixture deadlines and poll intervals are not deployment defaults.

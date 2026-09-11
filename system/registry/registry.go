@@ -25,6 +25,7 @@ type indexedSortBuilder interface {
 }
 
 type Reg struct {
+	publicationReady  chan struct{}
 	currentVersion    registry.Version
 	runner            registry.Runner
 	builder           registry.StateBuilder
@@ -75,6 +76,9 @@ func NewRegistry(
 		currentVersion:    version.FromParent(nil, 0), // initial version
 	}
 
+	if _, ok := history.(registry.PublishedHistory); ok {
+		reg.publicationReady = make(chan struct{})
+	}
 	reg.versionNum.Store(0)
 	reg.publishSnapshot()
 
@@ -178,6 +182,9 @@ func (r *Reg) publishSnapshot() {
 // --- StateWriter Interface Implementation ---
 
 func (r *Reg) Apply(ctx context.Context, changes registry.ChangeSet) (registry.Version, error) {
+	if history, ok := r.history.(registry.PublishedHistory); ok {
+		return r.submitPublished(ctx, history, changes)
+	}
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
 	changes = append(registry.ChangeSet(nil), changes...)
@@ -399,6 +406,9 @@ func (r *Reg) patchDepIndex(ops registry.ChangeSet) {
 }
 
 func (r *Reg) ApplyVersion(ctx context.Context, v registry.Version) error {
+	if history, ok := r.history.(registry.PublishedHistory); ok {
+		return r.restorePublished(ctx, history, v)
+	}
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
 
@@ -777,6 +787,9 @@ func (r *Reg) collectBackwardChangesets(path []registry.Version, targetVersion r
 // For v0 (empty history): applies baseline directly
 // For v1+: replays changesets v1..targetVersion on top of baseline, then applies final state once
 func (r *Reg) LoadState(ctx context.Context, baseline registry.State, targetVersion registry.Version) error {
+	if history, ok := r.history.(registry.PublishedHistory); ok {
+		return r.loadPublished(ctx, history, baseline, targetVersion)
+	}
 	if registry.DependencyAccessFromContext(ctx) == registry.DependencyAccessUnspecified {
 		ctx = registry.WithDependencyAccess(ctx, registry.DependencyAccessVerifiedOffline)
 	}
