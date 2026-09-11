@@ -1519,6 +1519,9 @@ func (h *DependencyHandler) resolveEffectiveModules(
 	lockedVersions map[string]string,
 	resolution *regapi.DependencyResolution,
 ) ([]ResolvedModule, error) {
+	if modules, recorded, err := recordedModules(ctx, deps); recorded {
+		return modules, err
+	}
 	if regapi.DependencyAccessFromContext(ctx) == regapi.DependencyAccessVerifiedOffline {
 		if resolved, ok := h.lockedResolution(deps, lockedVersions); ok {
 			if h.logger != nil {

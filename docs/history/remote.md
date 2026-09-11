@@ -42,4 +42,14 @@ wippy registry export-history-baseline --lock-file wippy.lock > baseline.json
 
 Use the same `--profile` and `--set` options as the deployed runtime. The export uses the existing module entry loader. It preserves entry ownership and root metadata. If the baseline has authored dependency roots, supply `--resolution-file resolution.json`. This file must contain the exact `DependencyResolution` JSON for that baseline. The exporter checks the declarations and graph digest. It does not select new module versions. The output is a Version protobuf JSON document with revision zero. The importer must verify it against the source history and the configured size limit.
 
+Export a raw source bundle with the history service command. Then create complete snapshots with the runtime command:
+
+```sh
+wippy registry materialize-history --source source.jsonl --output snapshots.jsonl --max-record-bytes "$HISTORY_RECORD_LIMIT"
+```
+
+Set the record limit to the tested service import limit. The bundle contains the immutable baseline. The runtime replays each original transaction from its stored parent. It uses the exact stored graph and verified module artifacts. It preserves branches, authored operations, and deletion records. Root zero can use the baseline graph. A missing graph at a later version stops export when dependency operations or declarations need it. The command does not select a replacement graph.
+
+The reader keeps version identities in memory. The command stores complete branch snapshots and artifacts in a temporary directory beside the output. It removes this directory when export ends. The output replaces its destination only after all records pass validation. Import the completed bundle with the history service command. The service must fence the source and verify that its raw records have not changed. Root-zero snapshots have no legacy changeset. The separate raw root record remains unchanged.
+
 Run remote recovery checks with the `historyintegration` build tag. This check requires an actual service, PostgreSQL, and Temporal. Set the `WIPPY_HISTORY_RECOVERY_*` variables from the test service configuration. The check starts independent writer and reader processes in separate empty directories. Test fixture deadlines and poll intervals are not deployment defaults.
