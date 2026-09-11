@@ -181,6 +181,9 @@ func (r *Reg) applyPublication(ctx context.Context, history registry.PublishedHi
 	snapshot := append(registry.State(nil), r.state...)
 	current := r.currentVersion
 	r.mu.RUnlock()
+	if reset && current != nil && current.ID() > published.Version.ID() {
+		return fmt.Errorf("cannot load published revision %d before current revision %d", published.Version.ID(), current.ID())
+	}
 	if !reset && current != nil && current.ID() > published.Version.ID() {
 		return nil
 	}

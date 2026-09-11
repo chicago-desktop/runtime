@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/wippyai/runtime/api/payload"
 	regapi "github.com/wippyai/runtime/api/registry"
+	entryencoding "github.com/wippyai/runtime/api/registry/history/encoding"
 	historyv1 "github.com/wippyai/runtime/api/registry/history/v1"
 	"github.com/wippyai/runtime/internal/version"
 	"github.com/wippyai/runtime/system/registry/history/remote"
@@ -61,8 +62,8 @@ func (s *publicationRecoveryServer) ReportApplied(context.Context, *historyv1.Ap
 	return &historyv1.Empty{}, nil
 }
 
-func TestAppliedPublicationUnblocksWriteAfterUnknownCommit(t *testing.T) {
-	server := &publicationRecoveryServer{}
+func newPublicationRemote(t *testing.T, server historyv1.HistoryServiceServer) *remote.History {
+	t.Helper()
 	listener := bufconn.Listen(1024 * 1024)
 	grpcServer := grpc.NewServer()
 	historyv1.RegisterHistoryServiceServer(grpcServer, server)
@@ -73,11 +74,17 @@ func TestAppliedPublicationUnblocksWriteAfterUnknownCommit(t *testing.T) {
 	t.Cleanup(func() { require.NoError(t, connection.Close()) })
 	history, err := remote.New(connection, remote.Config{Key: &historyv1.RegistryKey{TenantId: "tenant", EnvironmentId: "stage", RegistryId: "registry"}, ReplicaID: "replica", Timeout: time.Second, PollInterval: time.Millisecond})
 	require.NoError(t, err)
+	return history
+}
+
+func TestAppliedPublicationUnblocksWriteAfterUnknownCommit(t *testing.T) {
+	server := &publicationRecoveryServer{}
+	history := newPublicationRemote(t, server)
 	resolver := topology.NewResolver()
 	builder := topology.NewStateBuilder(zap.NewNop(), resolver)
 	reg := NewRegistry(history, newApplyingMockRunner(builder), builder, resolver, zap.NewNop())
 	first := regapi.Entry{ID: regapi.NewID("test", "first"), Kind: regapi.EntryKind, Data: payload.NewString("first")}
-	_, err = reg.Apply(t.Context(), regapi.ChangeSet{{Kind: regapi.EntryCreate, Entry: first}})
+	_, err := reg.Apply(t.Context(), regapi.ChangeSet{{Kind: regapi.EntryCreate, Entry: first}})
 	require.ErrorIs(t, err, remote.ErrCommitUnknown)
 	require.Empty(t, reg.Snapshot().Entries)
 	require.NoError(t, reg.applyPublication(t.Context(), history, &regapi.PublishedState{Version: version.New(3), Changes: regapi.ChangeSet{{Kind: regapi.EntryUpdate, Entry: first}}}, nil, false))
@@ -88,4 +95,66 @@ func TestAppliedPublicationUnblocksWriteAfterUnknownCommit(t *testing.T) {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	require.Equal(t, 3, server.receiptReads)
+}
+
+type backwardLoadServer struct {
+	historyv1.UnimplementedHistoryServiceServer
+	versions map[uint64]*historyv1.Version
+	submits  []*historyv1.SubmitRequest
+	mu       sync.Mutex
+}
+
+func (s *backwardLoadServer) GetVersion(_ context.Context, request *historyv1.GetRequest) (*historyv1.Version, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	result := s.versions[request.Revision]
+	if result == nil {
+		return nil, status.Error(codes.NotFound, "version not found")
+	}
+	return result, nil
+}
+
+func (s *backwardLoadServer) Submit(_ context.Context, request *historyv1.SubmitRequest) (*historyv1.SubmitResponse, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.submits = append(s.submits, request)
+	entries := append([]*historyv1.Mutation(nil), s.versions[2].Entries...)
+	entries = append(entries, request.Mutations...)
+	s.versions[3] = &historyv1.Version{Revision: 3, Entries: entries}
+	return &historyv1.SubmitResponse{Receipt: &historyv1.Receipt{RequestId: request.RequestId, Revision: 3, PublishedRevision: 3, Status: "published"}}, nil
+}
+
+func (s *backwardLoadServer) ReportApplied(context.Context, *historyv1.AppliedRequest) (*historyv1.Empty, error) {
+	return &historyv1.Empty{}, nil
+}
+
+func TestPublishedLoadRejectsBackwardRevisionBeforeNextWrite(t *testing.T) {
+	firstV1 := regapi.Entry{ID: regapi.NewID("test", "first"), Kind: regapi.EntryKind, Data: payload.NewString("one")}
+	firstV2 := firstV1
+	firstV2.Data = payload.NewString("two")
+	encodedV1, err := entryencoding.EncodeEntry(firstV1)
+	require.NoError(t, err)
+	encodedV2, err := entryencoding.EncodeEntry(firstV2)
+	require.NoError(t, err)
+	server := &backwardLoadServer{versions: map[uint64]*historyv1.Version{
+		1: {Revision: 1, Entries: []*historyv1.Mutation{{EntryId: firstV1.ID.String(), Value: encodedV1}}},
+		2: {Revision: 2, Entries: []*historyv1.Mutation{{EntryId: firstV2.ID.String(), Value: encodedV2}}},
+	}}
+	history := newPublicationRemote(t, server)
+	resolver := topology.NewResolver()
+	builder := topology.NewStateBuilder(zap.NewNop(), resolver)
+	reg := NewRegistry(history, newApplyingMockRunner(builder), builder, resolver, zap.NewNop())
+	require.NoError(t, reg.LoadState(t.Context(), nil, version.New(2)))
+	err = reg.LoadState(t.Context(), nil, version.New(1))
+	require.ErrorContains(t, err, "cannot load published revision 1 before current revision 2")
+	require.Equal(t, uint(2), reg.Snapshot().Version.ID())
+	require.Equal(t, regapi.State{firstV2}, reg.Snapshot().Entries)
+	second := regapi.Entry{ID: regapi.NewID("test", "second"), Kind: regapi.EntryKind, Data: payload.NewString("second")}
+	_, err = reg.Apply(t.Context(), regapi.ChangeSet{{Kind: regapi.EntryCreate, Entry: second}})
+	require.NoError(t, err)
+	require.ElementsMatch(t, regapi.State{firstV2, second}, reg.Snapshot().Entries)
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	require.Len(t, server.submits, 1)
+	require.Equal(t, uint64(2), server.submits[0].GetExpectedRevision())
 }
