@@ -22,6 +22,7 @@ type Snapshot struct {
 	overlayOwner string
 	entries      []regapi.Entry
 	overlayGen   uint64
+	revision     uint64
 }
 
 // snapshotState returns the entry state and selected module graph captured by

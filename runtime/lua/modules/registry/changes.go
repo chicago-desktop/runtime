@@ -3,9 +3,11 @@
 package registry
 
 import (
+	"errors"
 	"fmt"
 
 	lua "github.com/wippyai/go-lua"
+	apierror "github.com/wippyai/runtime/api/error"
 	regapi "github.com/wippyai/runtime/api/registry"
 	"github.com/wippyai/runtime/runtime/lua/engine/value"
 	"github.com/wippyai/runtime/runtime/security"
@@ -293,11 +295,22 @@ func changesApply(l *lua.LState) int {
 		return 2
 	}
 
-	version, applyErr := changes.snapshot.reg.Apply(l.Context(), changes.ops)
+	writer, supported := changes.snapshot.reg.(regapi.SnapshotWriter)
+	if !supported || changes.snapshot.revision == 0 {
+		l.Push(lua.LNil)
+		l.Push(lua.NewLuaError(l, "apply requires a current registry snapshot with guarded-write support").
+			WithKind(lua.Invalid).
+			WithRetryable(false))
+		return 2
+	}
+	version, applyErr := writer.ApplyAt(l.Context(), changes.snapshot.revision, changes.ops)
 	if applyErr != nil {
-		err := lua.WrapErrorWithLua(l, applyErr, "apply changes").
-			WithKind(lua.Internal).
-			WithRetryable(false)
+		err := lua.WrapErrorWithLua(l, applyErr, "apply changes").WithKind(lua.Internal).WithRetryable(false)
+		var structured apierror.Error
+		if errors.As(applyErr, &structured) {
+			err.WithKind(lua.Kind(structured.Kind()))
+			err.WithRetryable(structured.Retryable() == apierror.True)
+		}
 		l.Push(lua.LNil)
 		l.Push(err)
 		return 2

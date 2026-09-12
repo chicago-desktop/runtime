@@ -489,6 +489,19 @@ Applies the changeset. A normal snapshot creates a registry version. An overlay
 snapshot changes only its process-local overlay and returns the unchanged
 current durable version.
 
+A normal changeset is bound to the effective state captured by
+`registry.snapshot()`. If a durable write, overlay change, history selection or
+reload changes that state before apply, it returns `errors.CONFLICT` before
+dependency expansion or activation. Capture a fresh snapshot and review the
+changes again; repeating the same changeset cannot refresh its base. The check
+and write share the registry writer lock. Existing `registry.apply` permission
+is still required.
+
+Historical snapshots (`snapshot_at`) do not carry a current effective-state
+revision and cannot publish directly. Registry implementations without guarded
+snapshot writes also refuse this operation; there is no unguarded fallback.
+Overlay snapshots retain their separate owner-generation check.
+
 **Returns:**
 
 - Success: New Version object, nil
@@ -499,6 +512,8 @@ current durable version.
 | Condition | Kind | Retryable |
 |-----------|------|-----------|
 | No changes to apply | errors.INVALID | no |
+| Historical snapshot or backend without guarded writes | errors.INVALID | no |
+| Effective state changed after snapshot | errors.CONFLICT | yes |
 | Permission denied | errors.PERMISSION_DENIED | no |
 | Sort operations failed | errors.INTERNAL | no |
 | Apply changes failed | errors.INTERNAL | no |

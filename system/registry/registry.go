@@ -43,6 +43,7 @@ type Reg struct {
 	baseline          registry.State
 	overlayEpoch      uint64
 	overlayFloor      uint64
+	snapshotRevision  uint64
 	versionNum        atomic.Uint64
 	mu                sync.RWMutex
 	applyMu           sync.Mutex
@@ -158,6 +159,7 @@ func (r *Reg) Snapshot() registry.Snapshot {
 	entries := append(registry.State(nil), current.Entries...)
 	return registry.Snapshot{
 		Version:  current.Version,
+		Revision: current.Revision,
 		Entries:  entries,
 		Registry: registry.StateMetadata{Resolution: current.Registry.Resolution.Canonical()},
 	}
@@ -168,8 +170,10 @@ func (r *Reg) Snapshot() registry.Snapshot {
 // writes or are constructing an unpublished registry.
 func (r *Reg) publishSnapshot() {
 	entries := append(registry.State(nil), r.state...)
+	r.snapshotRevision++
 	r.snapshot.Store(&registry.Snapshot{
 		Version:  r.currentVersion,
+		Revision: r.snapshotRevision,
 		Entries:  entries,
 		Registry: registry.StateMetadata{Resolution: r.currentResolution},
 	})
@@ -180,6 +184,24 @@ func (r *Reg) publishSnapshot() {
 func (r *Reg) Apply(ctx context.Context, changes registry.ChangeSet) (registry.Version, error) {
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
+	return r.applyLocked(ctx, changes)
+}
+
+// ApplyAt applies changes only to the effective state captured by Snapshot.
+// Holding applyMu across the comparison and transition also fences overlays
+// and history selection, even when they leave the durable version unchanged.
+func (r *Reg) ApplyAt(ctx context.Context, revision uint64, changes registry.ChangeSet) (registry.Version, error) {
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+	current := r.snapshot.Load()
+	if revision == 0 || revision != current.Revision {
+		return nil, NewSnapshotRevisionConflictError(revision, current.Revision)
+	}
+	return r.applyLocked(ctx, changes)
+}
+
+// applyLocked requires applyMu for the entire transition.
+func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (registry.Version, error) {
 	changes = append(registry.ChangeSet(nil), changes...)
 	canonicalizeChangeSetIDs(changes)
 

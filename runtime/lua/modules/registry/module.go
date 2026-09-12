@@ -345,11 +345,12 @@ func registrySnapshot(l *lua.LState) int {
 	state := reg.Snapshot()
 
 	snap := &Snapshot{
-		reg:     reg,
-		state:   state.Registry,
-		version: state.Version,
-		entries: state.Entries,
-		log:     zap.NewNop(),
+		reg:      reg,
+		state:    state.Registry,
+		version:  state.Version,
+		revision: state.Revision,
+		entries:  state.Entries,
+		log:      zap.NewNop(),
 	}
 
 	value.PushTypedUserData(l, snap, typeSnapshot)

@@ -114,6 +114,10 @@ type (
 		Registry StateMetadata
 		Version  Version
 		Entries  State
+		// Revision identifies this effective state within the current registry
+		// instance, including overlays. Zero means no guarded-write support.
+		// Unlike Version, it is not a durable history identifier.
+		Revision uint64
 	}
 
 	// StateMetadata contains registry-owned state that is not authored entry
@@ -188,6 +192,14 @@ type (
 		ApplyVersion(context.Context, Version) error
 		// LoadState initializes registry state from baseline and history without creating new version records
 		LoadState(context.Context, State, Version) error
+	}
+
+	// SnapshotWriter rejects a stale effective-state revision before expansion
+	// or activation. The comparison and write share the registry's writer lock.
+	// Obtain the revision from Snapshot on the same registry instance; revisions
+	// are not transferable between instances or across process restarts.
+	SnapshotWriter interface {
+		ApplyAt(context.Context, uint64, ChangeSet) (Version, error)
 	}
 
 	// OverlayWriter manages process-local registry overlays. Overlay entries

@@ -90,6 +90,13 @@ func NewCommitEffectsError(err error, rollbackErr error) apierror.Error {
 		WithCause(err)
 }
 
+// NewSnapshotRevisionConflictError rejects changes based on an older effective state.
+func NewSnapshotRevisionConflictError(expected, actual uint64) apierror.Error {
+	return apierror.New(apierror.Conflict, "registry snapshot is no longer current").
+		WithRetryable(apierror.True).
+		WithDetails(attrs.NewBagFrom(map[string]any{"expected_revision": expected, "actual_revision": actual}))
+}
+
 // NewConcurrentApplyError creates an error when registry state changes mid-apply.
 func NewConcurrentApplyError(expected, actual uint) apierror.Error {
 	return apierror.New(apierror.Conflict, "registry changed during apply").
