@@ -60,8 +60,8 @@ func TestExplicitStateBypassesExecutableDefault(t *testing.T) {
 
 func TestInvalidExecutableDefaultRefusesBeforeLaunch(t *testing.T) {
 	for _, test := range []struct {
-		name    string
 		resolve func() (string, error)
+		name    string
 	}{
 		{name: "empty", resolve: func() (string, error) { return "", nil }},
 		{name: "failure", resolve: func() (string, error) { return "", errors.New("unavailable") }},
