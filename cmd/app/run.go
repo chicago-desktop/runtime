@@ -25,13 +25,16 @@ type Options struct {
 	Launch Launch
 	// Baseline selects ordinary startup code: "activated" (also the default)
 	// or "embedded". Both retain the selected state's registry history.
-	Baseline   string
-	DataEnv    map[string]string
-	Components []boot.Component
-	Name       string
-	Command    string
-	Mode       string
-	Bundle     Bundle
+	Baseline string
+	// DefaultStateDir lets the executable select its application state when the
+	// invocation does not provide --state-dir. Explicit state always wins.
+	DefaultStateDir func() (string, error)
+	DataEnv         map[string]string
+	Components      []boot.Component
+	Name            string
+	Command         string
+	Mode            string
+	Bundle          Bundle
 }
 
 var applicationName = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
@@ -68,11 +71,22 @@ func Run(ctx context.Context, options Options, args []string) error {
 		return err
 	}
 	if *state == "" {
-		config, err := os.UserConfigDir()
-		if err != nil {
-			return err
+		if options.DefaultStateDir != nil {
+			selected, err := options.DefaultStateDir()
+			if err != nil {
+				return fmt.Errorf("resolve application state directory: %w", err)
+			}
+			if selected == "" {
+				return fmt.Errorf("application default state directory is empty")
+			}
+			*state = selected
+		} else {
+			config, err := os.UserConfigDir()
+			if err != nil {
+				return err
+			}
+			*state = filepath.Join(config, options.Name)
 		}
-		*state = filepath.Join(config, options.Name)
 	}
 	stateDir, err := filepath.Abs(*state)
 	if err != nil {

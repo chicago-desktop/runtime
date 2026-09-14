@@ -32,6 +32,51 @@ func TestClientLaunchDoesNotOpenOwnerState(t *testing.T) {
 	require.NoDirExists(t, state)
 }
 
+func TestExecutableSelectsDefaultStateBeforeLaunch(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "selected")
+	options := launchOptions(func(_ context.Context, request LaunchRequest, _ func(OwnerOptions) error) error {
+		require.Equal(t, state, request.StateDir)
+		return nil
+	})
+	options.DefaultStateDir = func() (string, error) { return state, nil }
+	require.NoError(t, Run(t.Context(), options, nil))
+	require.NoDirExists(t, state)
+}
+
+func TestExplicitStateBypassesExecutableDefault(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "explicit")
+	called := false
+	options := launchOptions(func(_ context.Context, request LaunchRequest, _ func(OwnerOptions) error) error {
+		require.Equal(t, state, request.StateDir)
+		return nil
+	})
+	options.DefaultStateDir = func() (string, error) {
+		called = true
+		return "", errors.New("must not run")
+	}
+	require.NoError(t, Run(t.Context(), options, []string{"--state-dir", state}))
+	require.False(t, called)
+}
+
+func TestInvalidExecutableDefaultRefusesBeforeLaunch(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		resolve func() (string, error)
+	}{
+		{name: "empty", resolve: func() (string, error) { return "", nil }},
+		{name: "failure", resolve: func() (string, error) { return "", errors.New("unavailable") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			options := launchOptions(func(context.Context, LaunchRequest, func(OwnerOptions) error) error {
+				t.Fatal("launch called with invalid default state")
+				return nil
+			})
+			options.DefaultStateDir = test.resolve
+			require.Error(t, Run(t.Context(), options, nil))
+		})
+	}
+}
+
 func TestBusyOwnerCanSelectClientWithoutOpeningStores(t *testing.T) {
 	state := t.TempDir()
 	unlock, err := lockApplication(state)
