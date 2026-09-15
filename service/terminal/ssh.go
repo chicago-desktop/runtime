@@ -178,7 +178,7 @@ func (h *SSHHost) Start(ctx context.Context) (<-chan any, error) {
 		server.PublicKeyCallback = h.authorize
 	}
 	server.AddHostKey(signer)
-	listener, err := net.Listen("tcp", h.cfg.Address)
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", h.cfg.Address)
 	if err != nil {
 		h.running.Store(false)
 		return nil, fmt.Errorf("ssh listen on %s: %w", h.cfg.Address, err)
@@ -487,8 +487,9 @@ func (h *SSHHost) releaseSlot() {
 }
 
 // Payloads of the channel requests a terminal session uses (RFC 4254 §6).
+// Field order is the wire order ssh.Unmarshal reads, not a choice.
 type (
-	ptyRequest struct {
+	ptyRequest struct { //nolint:govet // fieldalignment: RFC 4254 §6.2 field order
 		Term    string
 		Columns uint32
 		Rows    uint32
@@ -906,7 +907,7 @@ func (h *SSHHost) askKeyOwner(key string) (bool, string, error) {
 // readAuthorizedKeys reads an OpenSSH authorized_keys file.
 //
 // A key carrying options (from=, command=, restrict…) is left out, not
-// accepted without them: honouring none of the options would turn a key its
+// accepted without them: honoring none of the options would turn a key its
 // owner restricted into one that is not.
 func readAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
 	data, err := os.ReadFile(expandHome(path))

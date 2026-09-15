@@ -359,7 +359,7 @@ func TestSSHRefusesCommandsAndForwarding(t *testing.T) {
 
 	// The refused command leaves the connection usable: a first attempt
 	// that failed must not take it along.
-	_, _, err = client.OpenChannel("direct-tcpip", ssh.Marshal(struct {
+	_, _, err = client.OpenChannel("direct-tcpip", ssh.Marshal(struct { //nolint:govet // fieldalignment: RFC 4254 §7.2 field order
 		Host     string
 		Port     uint32
 		OrigHost string

@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 	"io"
 	"math"
 	"os"
 	"strings"
 	"sync"
+
+	// Register the GIF, JPEG and PNG decoders with image.Decode, which the
+	// splash uses to read the picture file it shows.
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 
 	"github.com/charmbracelet/x/term"
 	ttyapi "github.com/wippyai/runtime/api/tty"
@@ -25,8 +28,8 @@ import (
 // fullscreen surface. Reusing the surface makes the first app frame remove the
 // image in the same transaction, including on terminals using sixel.
 type Splash struct {
-	mu      sync.Mutex
 	surface *Surface
+	mu      sync.Mutex
 }
 
 type splashKey struct{}

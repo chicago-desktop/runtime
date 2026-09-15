@@ -4,7 +4,6 @@ package gfx
 
 import (
 	"fmt"
-	xdraw "golang.org/x/image/draw"
 	"image"
 	"image/draw"
 	"strings"
@@ -18,6 +17,7 @@ import (
 
 	lua "github.com/wippyai/go-lua"
 	"github.com/wippyai/runtime/runtime/lua/engine/value"
+	xdraw "golang.org/x/image/draw"
 )
 
 // Pictures that were drawn by someone else.
@@ -100,7 +100,7 @@ func gfxImageNew(l *lua.LState) int {
 
 // rasterBlit stamps one raster into another with its top-left at x, y.
 //
-// Transparency is honoured, because that is the whole point: an icon is a
+// Transparency is honored, because that is the whole point: an icon is a
 // picture with a hole in it, and a blit that ignored alpha would paint the
 // hole as black and put a rectangle on the desktop.
 func rasterBlit(l *lua.LState) int {
@@ -216,8 +216,8 @@ func blitInto(target, source *Raster, x, y int) {
 // raster on purpose: the interface stays pixel-exact, and a caller that wants
 // a photograph to fit a window asks for that explicitly and keeps the result.
 //
-// Nearest neighbour by default — it keeps 16-colour artwork hard-edged, and a
-// downscaled photograph is still recognisable. `smooth = true` switches to
+// Nearest neighbor by default — it keeps 16-color artwork hard-edged, and a
+// downscaled photograph is still recognizable. `smooth = true` switches to
 // bilinear for photographs where blockiness would be worse than blur.
 func rasterScaled(l *lua.LState) int {
 	source := checkRasterArg(l)

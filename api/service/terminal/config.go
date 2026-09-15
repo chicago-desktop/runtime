@@ -40,7 +40,6 @@ const (
 
 // SSHConfig configures a terminal.ssh host.
 type SSHConfig struct {
-	Lifecycle supervisor.LifecycleConfig `json:"lifecycle"`
 	// Address to listen on. Loopback by default: exposing a desktop to the
 	// network is a decision, not a default.
 	Address string `json:"address"`
@@ -66,9 +65,10 @@ type SSHConfig struct {
 	Entry string `json:"entry"`
 	// CloseGrace is how long a process whose terminal disconnected has to
 	// finish after it was asked to, before it is terminated.
-	CloseGrace  string `json:"close_grace"`
-	MaxSessions int    `json:"max_sessions"`
-	Workers     int    `json:"workers"`
+	CloseGrace  string                     `json:"close_grace"`
+	Lifecycle   supervisor.LifecycleConfig `json:"lifecycle"`
+	MaxSessions int                        `json:"max_sessions"`
+	Workers     int                        `json:"workers"`
 	grace       time.Duration
 }
 

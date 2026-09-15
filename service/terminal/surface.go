@@ -15,33 +15,33 @@ import (
 type Surface struct {
 	out      io.Writer
 	closeErr error
-	cursor   *ttyapi.Cursor
+	// probe is the terminal this surface presents to; its cell size is
+	// baked into every sixel payload.
+	probe *ttyapi.Probe
+	// encode writes the command that places one raster. Tests replace it to
+	// count encodings; nil means appendPlaceOn with the surface's probe.
+	encode func(out []byte, protocol graphicsProtocol, place ttyapi.Placement) []byte
+	// The last encoding of each placement, by id. A raster sent again with
+	// the same key (see encodedKey) is copied from here instead of encoded.
+	encoded map[string]encodedEntry
+	cursor  *ttyapi.Cursor
 	// What rasters are on screen and where. They survive between frames on
 	// the terminal's side, so the surface is the only thing that knows they
 	// exist — nobody else can take them away.
 	placements map[string]placementState
-	// The last encoding of each placement, by id. A raster sent again with
-	// the same key (see encodedKey) is copied from here instead of encoded.
-	encoded      map[string]encodedEntry
-	encodedBytes int
+	graphics   graphicsProtocol
+	rows       []string
+	scratch    []byte
+	frameSeq   uint64
 	// encodedLimit caps encodedBytes; zero turns the cache off.
 	encodedLimit int
-	// encode writes the command that places one raster. Tests replace it to
-	// count encodings; nil means appendPlaceOn with the surface's probe.
-	encode   func(out []byte, protocol graphicsProtocol, place ttyapi.Placement) []byte
-	frameSeq uint64
-	rows     []string
-	scratch  []byte
-	graphics graphicsProtocol
-	// probe is the terminal this surface presents to; its cell size is
-	// baked into every sixel payload.
-	probe    *ttyapi.Probe
-	mu       sync.Mutex
-	opts     ttyapi.SurfaceOptions
-	opened   bool
-	acquired bool
-	invalid  bool
-	closed   bool
+	encodedBytes int
+	mu           sync.Mutex
+	opts         ttyapi.SurfaceOptions
+	opened       bool
+	acquired     bool
+	invalid      bool
+	closed       bool
 }
 
 func NewSurface(out io.Writer, opts ttyapi.SurfaceOptions) *Surface {

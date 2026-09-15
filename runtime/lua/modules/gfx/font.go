@@ -21,8 +21,8 @@ import (
 // Text in pixels.
 //
 // Without this the pixel path can draw an interface but cannot label it, and
-// an unlabelled interface is a picture of one. Everything else here — bevels,
-// palettes, exact colours — is in service of a screen a person reads.
+// an unlabeled interface is a picture of one. Everything else here — bevels,
+// palettes, exact colors — is in service of a screen a person reads.
 //
 // The font arrives as BYTES, not as a path. That is a security decision and
 // not a style one: reading a file is something the process's own filesystem
@@ -50,15 +50,15 @@ const (
 //
 // Size belongs to the object rather than to each call because a face carries
 // hinting and metrics computed for its size: making one per draw would
-// rasterise the same glyph over and over, and per-frame work is exactly what
+// rasterize the same glyph over and over, and per-frame work is exactly what
 // this module exists to keep out of Lua.
 type Font struct {
-	mu     sync.Mutex
 	face   font.Face
-	size   float64
 	name   string
+	size   float64
 	height int
 	ascent int
+	mu     sync.Mutex
 	smooth bool
 }
 

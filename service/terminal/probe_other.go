@@ -4,7 +4,14 @@
 
 package terminal
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// errProbeUnsupported means the platform gives no way to wait for the
+// terminal's answer without blocking a descriptor the program needs back.
+var errProbeUnsupported = errors.New("terminal capability query not supported on this platform")
 
 // waitReadable is unavailable here, so the terminal is never asked and the
 // environment has the only word. Reporting this as a failed wait rather than

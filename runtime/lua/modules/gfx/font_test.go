@@ -157,7 +157,7 @@ func TestCrispTextHasNoGreyPixels(t *testing.T) {
 		}
 		red, green, blue := raster.img.Pix[offset], raster.img.Pix[offset+1], raster.img.Pix[offset+2]
 		if alpha == 255 && (red != 0 || green != 0 || blue != 0) {
-			t.Fatalf("crisp text produced a blended colour (%d,%d,%d)", red, green, blue)
+			t.Fatalf("crisp text produced a blended color (%d,%d,%d)", red, green, blue)
 		}
 	}
 }
@@ -219,7 +219,7 @@ func TestMissingGlyphCostsOneGapNotTheSentence(t *testing.T) {
 
 func TestMeasureMatchesWhatGetsDrawn(t *testing.T) {
 	// Layout is done by measuring and drawing is done separately. If the two
-	// disagree, every centred label is off by an amount that changes with the
+	// disagree, every centered label is off by an amount that changes with the
 	// text — the hardest kind of visual bug to attribute.
 	f := testFont(t, 13)
 	const text = "Панель управления"

@@ -4,7 +4,6 @@ package terminal
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"os"
 	"strconv"
@@ -65,15 +64,11 @@ const probeTimeout = 300 * time.Millisecond
 // generous so a reply never arrives split across two polls for no reason.
 const probeReadSize = 256
 
-// errProbeUnsupported means the platform gives no way to wait for the
-// terminal's answer without blocking a descriptor the program needs back.
-var errProbeUnsupported = errors.New("terminal capability query not supported on this platform")
-
 // probeTerminal asks the terminal and records the answer.
 //
 // It is deliberately quiet about failure. A terminal that cannot be asked is
 // not broken — a pipe, a test harness, a platform without poll — and falling
-// back to the environment is the behaviour that was there before. What must
+// back to the environment is the behavior that was there before. What must
 // not happen is the probe reporting a refusal as if the terminal had said no:
 // "nobody asked" and "it said no" are different facts, and only the second
 // one should silence the guess.
