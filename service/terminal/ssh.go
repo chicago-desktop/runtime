@@ -228,6 +228,12 @@ func (h *SSHHost) Stop(ctx context.Context) error {
 	// Dropping a connection asks its program to finish, as any hangup does.
 	// The host keeps delivering messages meanwhile: a desktop closing its
 	// windows has to hear them go.
+	// Once the connection is gone nothing reaches the client's terminal, and
+	// its program's own cleanup would come too late: switch the input modes
+	// off while the channels are still open.
+	for _, session := range h.openSessions() {
+		session.restoreModes()
+	}
 	for _, conn := range conns {
 		_ = conn.server.Close()
 	}
@@ -248,6 +254,17 @@ func (h *SSHHost) Stop(ctx context.Context) error {
 	close(statusCh)
 	h.log.Info("ssh terminal host stopped", zap.String("id", h.id.String()))
 	return nil
+}
+
+// openSessions is a snapshot of the sessions a program runs in.
+func (h *SSHHost) openSessions() []*sshSession {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sessions := make([]*sshSession, 0, len(h.sessions))
+	for _, session := range h.sessions {
+		sessions = append(sessions, session)
+	}
+	return sessions
 }
 
 func (h *SSHHost) sessionPIDs() []pid.PID {
@@ -649,8 +666,23 @@ func (s *sshSession) hangup() {
 	}
 }
 
+// restoreModes switches the client terminal's input modes (mouse reporting,
+// bracketed paste) back off. OpenSSH restores its own raw mode when the
+// session ends, but not modes the program switched on: without this, every
+// mouse move in the shell the person returns to types an SGR sequence.
+func (s *sshSession) restoreModes() {
+	s.mu.Lock()
+	pty, finished := s.hasPty, s.finished
+	s.mu.Unlock()
+	if !pty || finished {
+		return
+	}
+	_, _ = s.channel.Write([]byte(terminalModesReset))
+}
+
 // finish reports how the program ended and closes the channel.
 func (s *sshSession) finish(code int, message string) {
+	s.restoreModes()
 	s.mu.Lock()
 	if s.finished {
 		s.mu.Unlock()

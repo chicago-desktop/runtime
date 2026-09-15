@@ -6,6 +6,7 @@ package terminal
 import (
 	"context"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"reflect"
@@ -27,6 +28,7 @@ import (
 	"github.com/wippyai/runtime/system/scheduler/actor"
 	securitysys "github.com/wippyai/runtime/system/security"
 	"go.uber.org/zap"
+	"golang.org/x/term"
 )
 
 // probeOnce guards the terminal capability query: one terminal, one
@@ -42,6 +44,7 @@ type Host struct {
 	scheduler    *actor.Scheduler
 	logCtrl      *logs.Configurator
 	raw          *RawManager
+	modesOut     io.Writer
 	statusCh     chan any
 	doneCh       chan struct{}
 	id           registry.ID
@@ -78,7 +81,36 @@ func NewHost(
 		statusCh:  make(chan any, 1),
 		doneCh:    make(chan struct{}),
 		raw:       NewRawManager(os.Stdin),
+		modesOut:  terminalOut(os.Stdout),
 	}
+}
+
+// terminalModesReset turns off every input mode a program may have switched
+// on in the terminal: mouse reporting (X10, button, any-motion, SGR and urxvt
+// encodings) and bracketed paste.
+const terminalModesReset = "\033[?1000l\033[?1002l\033[?1003l\033[?1006l\033[?1015l\033[?2004l"
+
+// terminalOut is where the host writes the modes reset on shutdown: stdout
+// when it is a terminal, nothing otherwise (a pipe or a log file must not get
+// escape sequences).
+func terminalOut(file *os.File) io.Writer {
+	if file == nil || !term.IsTerminal(int(file.Fd())) {
+		return nil
+	}
+	return file
+}
+
+// restoreModes switches the terminal's input modes back off. The input
+// reader does this when the program completes, but a host stopped with the
+// program still running (the runtime shutting down, ctrl+c) never gets
+// there: raw mode was reset, any-motion mouse reporting stayed on, and every
+// move of the mouse typed an SGR sequence into the shell the person returned
+// to. Writing the resets when nothing was on is harmless.
+func (h *Host) restoreModes() {
+	if h.modesOut == nil {
+		return
+	}
+	_, _ = io.WriteString(h.modesOut, terminalModesReset)
 }
 
 // OnStart implements scheduler.Lifecycle.
@@ -332,6 +364,7 @@ func (h *Host) Stop(ctx context.Context) error {
 	h.scheduler.Stop(ctx)
 	h.closeStatus()
 
+	h.restoreModes()
 	if h.raw != nil {
 		_ = h.raw.Reset()
 	}
