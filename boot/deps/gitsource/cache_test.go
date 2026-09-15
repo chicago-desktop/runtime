@@ -127,6 +127,27 @@ func TestCache_ResolveRef(t *testing.T) {
 	assert.Contains(t, err.Error(), "no-such-ref")
 }
 
+// TestCache_CloneIsCompleteSoAnotherCommitNeedsNoNetwork: the bare clone
+// carries every blob, so a second commit already in it is checked out with
+// the origin gone; a blobless clone would have to reach the server for each
+// missing blob.
+func TestCache_CloneIsCompleteSoAnotherCommitNeedsNoNetwork(t *testing.T) {
+	f := newFixture(t)
+	cache := New(t.TempDir())
+	src := f.source(t, "")
+	ctx := context.Background()
+
+	_, err := cache.Checkout(ctx, src, f.commits["0.2.0"])
+	require.NoError(t, err)
+
+	require.NoError(t, os.RemoveAll(f.bare), "the origin is gone; only the clone remains")
+	dir, err := cache.Checkout(ctx, src, f.commits["v0.1.0"])
+	require.NoError(t, err)
+	note, err := os.ReadFile(filepath.Join(dir, "src", "note.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "one\n", string(note))
+}
+
 func TestCache_CheckoutWritesTreeWithoutDotGit(t *testing.T) {
 	f := newFixture(t)
 	root := t.TempDir()

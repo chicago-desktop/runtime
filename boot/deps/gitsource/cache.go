@@ -182,17 +182,14 @@ func (c *Cache) ensureRepository(ctx context.Context, src Source) (string, error
 		return "", fmt.Errorf("git source %s: %w", src.Raw, err)
 	}
 	defer os.RemoveAll(staging)
-	// A blobless clone keeps the cache small when the server supports it; a
-	// server that does not answers with an error rather than a warning on
-	// some transports, so the plain bare clone is the fallback.
-	if _, err := c.git(ctx, src, "", "clone", "--bare", "--quiet", "--filter=blob:none", src.URL, staging); err != nil {
-		if errors.Is(err, ErrGitNotFound) {
-			return "", err
-		}
-		_ = os.RemoveAll(staging)
-		if _, err := c.git(ctx, src, "", "clone", "--bare", "--quiet", src.URL, staging); err != nil {
-			return "", err
-		}
+	// A full bare clone: one round trip for a module-sized repository. A
+	// blobless clone (--filter=blob:none) was measured to cost more, not
+	// less: the missing blobs are fetched lazily during the checkout, one
+	// round trip at a time - 16 s for a two-dozen-file module against 1 s
+	// for the whole clone - and every later checkout from the clone pays
+	// it again.
+	if _, err := c.git(ctx, src, "", "clone", "--bare", "--quiet", src.URL, staging); err != nil {
+		return "", err
 	}
 	if err := os.Rename(staging, repo); err != nil {
 		if info, statErr := os.Stat(repo); statErr == nil && info.IsDir() {

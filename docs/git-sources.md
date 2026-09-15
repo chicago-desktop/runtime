@@ -76,8 +76,10 @@ A dependency may name a git repository instead of a Hub module:
 - **Git.** The system `git` binary on PATH; a missing git is one clear
   error naming the source. Authentication is git's (credential helpers,
   the ssh agent, `GIT_*` variables); the runtime adds nothing. Clone
-  `--bare` (with `--filter=blob:none` when the server allows it), fetch
-  the one commit, materialize the checkout with
+  `--bare` in full (a blobless clone was measured to cost more: the blobs
+  are fetched lazily during the checkout, one round trip each — 16 s for
+  a two-dozen-file module against 1 s for the whole clone), fetch the one
+  commit, materialize the checkout with
   `git --work-tree=<dir> checkout <commit> -- .` (no `.git` inside the
   checkout).
 - **Verification.** The tree hash of the checkout is `local_hash`; a
