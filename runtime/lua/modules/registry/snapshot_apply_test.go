@@ -35,7 +35,7 @@ func newSnapshotRegistry() *regsystem.Reg {
 	return regsystem.NewRegistry(historymem.New(), snapshotRunner{builder}, builder, resolver, zap.NewNop())
 }
 
-func runSnapshotApplyLua(t *testing.T, ctx context.Context, reg regapi.Registry, source string) {
+func runSnapshotApplyLua(ctx context.Context, t *testing.T, reg regapi.Registry, source string) {
 	t.Helper()
 	l := lua.NewState()
 	defer l.Close()
@@ -51,7 +51,7 @@ func TestSnapshotApplyFencesDurableAndOverlayChanges(t *testing.T) {
 		`local other = registry.overlay("test:owner"):changes(); other:create({id="test:other", kind="registry.entry"}); assert(other:apply())`,
 	} {
 		reg := newSnapshotRegistry()
-		runSnapshotApplyLua(t, setupContextWithTranscoder(), reg, `
+		runSnapshotApplyLua(setupContextWithTranscoder(), t, reg, `
 			local base = registry.snapshot()
 			local changes = base:changes()
 			changes:create({id="test:mine", kind="registry.entry"})
@@ -80,7 +80,7 @@ func (r unguardedSnapshotRegistry) Apply(context.Context, regapi.ChangeSet) (reg
 
 func TestSnapshotApplyRequiresGuardedBackend(t *testing.T) {
 	reg := unguardedSnapshotRegistry{newSnapshotRegistry()}
-	runSnapshotApplyLua(t, setupContextWithTranscoder(), reg, `
+	runSnapshotApplyLua(setupContextWithTranscoder(), t, reg, `
 		local changes = registry.snapshot():changes()
 		changes:create({id="test:mine", kind="registry.entry"})
 		local result, err = changes:apply()
@@ -92,7 +92,7 @@ func TestSnapshotApplyRequiresGuardedBackend(t *testing.T) {
 
 func TestSnapshotApplyRequiresCurrentCaptureAndWritePermission(t *testing.T) {
 	reg := newSnapshotRegistry()
-	runSnapshotApplyLua(t, setupContextWithTranscoder(), reg, `
+	runSnapshotApplyLua(setupContextWithTranscoder(), t, reg, `
 		local changes = registry.snapshot():changes()
 		changes:create({id="test:first", kind="registry.entry"})
 		local version = assert(changes:apply())
@@ -104,7 +104,7 @@ func TestSnapshotApplyRequiresCurrentCaptureAndWritePermission(t *testing.T) {
 	before := reg.Snapshot()
 	ctx, release := strictOverlayContext(t)
 	defer release()
-	runSnapshotApplyLua(t, ctx, reg, `
+	runSnapshotApplyLua(ctx, t, reg, `
 		local changes = registry.snapshot():changes()
 		changes:create({id="test:denied", kind="registry.entry"})
 		local result, err = changes:apply()
