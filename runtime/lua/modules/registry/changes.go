@@ -16,9 +16,11 @@ import (
 
 // Changes represents a set of operations to modify the registry
 type Changes struct {
-	snapshot *Snapshot
-	log      *zap.Logger
-	ops      []regapi.Operation
+	snapshot      *Snapshot
+	log           *zap.Logger
+	previewDigest string
+	ops           []regapi.Operation
+	hasPreview    bool
 }
 
 // changesOps returns the operations in a changeset
@@ -78,6 +80,7 @@ func changesCreate(l *lua.LState) int {
 		Kind:  regapi.EntryCreate,
 		Entry: entry,
 	})
+	changes.previewDigest = ""
 
 	l.Push(l.Get(1))
 	return 1
@@ -106,6 +109,7 @@ func changesUpdate(l *lua.LState) int {
 		Kind:  regapi.EntryUpdate,
 		Entry: entry,
 	})
+	changes.previewDigest = ""
 
 	l.Push(l.Get(1))
 	return 1
@@ -128,6 +132,7 @@ func changesDelete(l *lua.LState) int {
 		return 2
 	}
 	seen := make(map[regapi.ID]struct{}, len(ids))
+	changes.previewDigest = ""
 	for _, id := range ids {
 		if _, exists := seen[id]; exists {
 			continue
@@ -303,22 +308,38 @@ func changesApply(l *lua.LState) int {
 			WithRetryable(false))
 		return 2
 	}
-	version, applyErr := writer.ApplyAt(l.Context(), changes.snapshot.revision, changes.ops)
-	if applyErr != nil {
-		err := lua.WrapErrorWithLua(l, applyErr, "apply changes").WithKind(lua.Internal).WithRetryable(false)
-		var structured apierror.Error
-		if errors.As(applyErr, &structured) {
-			err.WithKind(lua.Kind(structured.Kind()))
-			err.WithRetryable(structured.Retryable() == apierror.True)
+	var version regapi.Version
+	var applyErr error
+	if changes.hasPreview {
+		previewWriter, ok := changes.snapshot.reg.(regapi.PreviewWriter)
+		if !ok || changes.previewDigest == "" {
+			l.Push(lua.LNil)
+			l.Push(lua.NewLuaError(l, "a successful current preview is required after changing previewed operations").WithKind(lua.Invalid).WithRetryable(false))
+			return 2
 		}
+		version, applyErr = previewWriter.ApplyPreview(l.Context(), changes.snapshot.revision, changes.previewDigest, changes.ops)
+	} else {
+		version, applyErr = writer.ApplyAt(l.Context(), changes.snapshot.revision, changes.ops)
+	}
+	if applyErr != nil {
 		l.Push(lua.LNil)
-		l.Push(err)
+		l.Push(wrapRegistryError(l, applyErr, "apply changes"))
 		return 2
 	}
 
 	value.PushTypedUserData(l, version, typeVersion)
 	l.Push(lua.LNil)
 	return 2
+}
+
+func wrapRegistryError(l *lua.LState, err error, context string) *lua.Error {
+	wrapped := lua.WrapErrorWithLua(l, err, context).WithKind(lua.Internal).WithRetryable(false)
+	var structured apierror.Error
+	if errors.As(err, &structured) {
+		_ = wrapped.WithKind(lua.Kind(structured.Kind()))
+		_ = wrapped.WithRetryable(structured.Retryable() == apierror.True)
+	}
+	return wrapped
 }
 
 // checkChanges checks if the first argument is a Changes userdata

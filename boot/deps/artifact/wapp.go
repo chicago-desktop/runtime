@@ -4,6 +4,9 @@ package artifact
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -128,6 +131,36 @@ func (e *Effect) Results() []Materialized {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return append([]Materialized(nil), e.results...)
+}
+
+// PreviewDigest binds the stable inputs and destinations of materialization.
+// The selected module digest is measured separately by the registry dependency
+// resolution; this binds where and how those verified bytes are exposed.
+func (e *Effect) PreviewDigest() (string, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	type resource struct {
+		Meta          wapp.Metadata `json:"meta"`
+		ModuleVersion string        `json:"module_version"`
+		ResourceID    string        `json:"resource_id"`
+		Source        string        `json:"source"`
+	}
+	resources := make([]resource, len(e.resources))
+	for i, item := range e.resources {
+		resources[i] = resource{Meta: item.Meta, ModuleVersion: item.ModuleVersion,
+			ResourceID: item.ResourceID.String(), Source: item.Source}
+	}
+	encoded, err := json.Marshal(struct {
+		Root      string     `json:"root"`
+		Packs     []WAPP     `json:"packs"`
+		Resources []resource `json:"resources"`
+		Exact     bool       `json:"exact"`
+	}{Root: e.root, Exact: e.exact, Packs: e.packs, Resources: resources})
+	if err != nil {
+		return "", fmt.Errorf("measure artifact effect: %w", err)
+	}
+	sum := sha256.Sum256(encoded)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // Prepare validates every declared artifact before activating any output, then

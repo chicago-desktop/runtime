@@ -5,6 +5,7 @@ package expansion
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/wippyai/runtime/api/registry"
 	regtop "github.com/wippyai/runtime/system/registry/topology"
@@ -326,9 +327,26 @@ func (p *Planner) FinalizeEffects(ctx context.Context, effects []registry.Effect
 // RollbackEffects runs Rollback on each effect in reverse order.
 func (p *Planner) RollbackEffects(ctx context.Context, effects []registry.Effect) {
 	for i := len(effects) - 1; i >= 0; i-- {
+		if nilEffect(effects[i]) {
+			p.Log.Warn("cannot rollback nil registry effect")
+			continue
+		}
 		if err := effects[i].Rollback(ctx); err != nil {
 			p.Log.Warn("failed to rollback effect", zap.Error(err))
 		}
+	}
+}
+
+func nilEffect(effect registry.Effect) bool {
+	if effect == nil {
+		return true
+	}
+	value := reflect.ValueOf(effect)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
 	}
 }
 

@@ -85,7 +85,12 @@ func init() {
 	})
 
 	// Changes type (self-referential via create/update/delete, references versionType)
+	previewOperationType := typ.NewRecord().Field("kind", typ.String).Field("entry", stateEntryType).Build()
+	previewType := typ.NewRecord().Field("digest", typ.String).
+		Field("changes", typ.NewArray(previewOperationType)).Field("history", typ.NewArray(previewOperationType)).
+		OptField("resolution", resolutionType).Build()
 	changesType = typ.NewInterface("registry.Changes", []typ.Method{
+		{Name: "preview", Type: typ.Func().Param("self", typ.Self).Returns(previewType, typ.NewOptional(typ.LuaError)).Build()},
 		{Name: "ops", Type: typ.Func().Param("self", typ.Self).Returns(typ.NewArray(typ.Any)).Build()},
 		{Name: "create", Type: typ.Func().Param("self", typ.Self).Param("op", typ.Any).Returns(typ.Self, typ.NewOptional(typ.LuaError)).Build()},
 		{Name: "update", Type: typ.Func().Param("self", typ.Self).Param("op", typ.Any).Returns(typ.Self, typ.NewOptional(typ.LuaError)).Build()},

@@ -5,6 +5,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 
@@ -184,7 +185,7 @@ func (r *Reg) publishSnapshot() {
 func (r *Reg) Apply(ctx context.Context, changes registry.ChangeSet) (registry.Version, error) {
 	r.applyMu.Lock()
 	defer r.applyMu.Unlock()
-	return r.applyLocked(ctx, changes)
+	return r.applyLocked(ctx, changes, "")
 }
 
 // ApplyAt applies changes only to the effective state captured by Snapshot.
@@ -197,11 +198,24 @@ func (r *Reg) ApplyAt(ctx context.Context, revision uint64, changes registry.Cha
 	if revision == 0 || revision != current.Revision {
 		return nil, NewSnapshotRevisionConflictError(revision, current.Revision)
 	}
-	return r.applyLocked(ctx, changes)
+	return r.applyLocked(ctx, changes, "")
+}
+
+func (r *Reg) ApplyPreview(ctx context.Context, revision uint64, digest string, changes registry.ChangeSet) (registry.Version, error) {
+	r.applyMu.Lock()
+	defer r.applyMu.Unlock()
+	current := r.snapshot.Load()
+	if revision == 0 || revision != current.Revision {
+		return nil, NewSnapshotRevisionConflictError(revision, current.Revision)
+	}
+	if len(digest) != 64 {
+		return nil, fmt.Errorf("a measured registry preview is required")
+	}
+	return r.applyLocked(ctx, changes, digest)
 }
 
 // applyLocked requires applyMu for the entire transition.
-func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (registry.Version, error) {
+func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet, expectedDigest string) (registry.Version, error) {
 	changes = append(registry.ChangeSet(nil), changes...)
 	canonicalizeChangeSetIDs(changes)
 
@@ -211,6 +225,7 @@ func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (regi
 		allOps            registry.ChangeSet
 		historyOps        registry.ChangeSet
 		preparedEff       []registry.Effect
+		plannedEffects    []registry.Effect
 		planner           *regexp.Planner
 		snapshot          registry.State
 		baseVersion       registry.Version
@@ -227,17 +242,11 @@ func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (regi
 	changes = normalizeRegistryMetadata(changes, snapshot)
 
 	if len(r.directivesByKind) > 0 {
-		planner = regexp.NewPlanner(r.directivesByKind, r.resolver, r.log.Named("expansion"))
-
-		plan, err := planner.Expand(ctx, changes, snapshot)
+		var plan *regexp.Plan
+		var err error
+		planner, plan, err = r.expandLocked(ctx, changes, snapshot)
 		if err != nil {
-			return nil, NewExpandChangesError(err)
-		}
-
-		plan.Ops, err = planner.SortOps(snapshot, plan.Ops)
-		if err != nil {
-			planner.RollbackEffects(ctx, plan.Effects)
-			return nil, NewSortChangesError(err)
+			return nil, err
 		}
 
 		allOps, historyOps = plan.SplitScopes()
@@ -246,11 +255,7 @@ func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (regi
 			resolutionChanged = true
 		}
 
-		preparedEff, err = planner.PrepareEffects(ctx, plan.Effects)
-		if err != nil {
-			planner.RollbackEffects(ctx, preparedEff)
-			return nil, NewPrepareEffectsError(err)
-		}
+		plannedEffects = plan.Effects
 	} else {
 		sorted, err := r.sortWithIndex(snapshot, changes)
 		if err != nil {
@@ -269,15 +274,35 @@ func (r *Reg) applyLocked(ctx context.Context, changes registry.ChangeSet) (regi
 		allOps = sorted
 	} else {
 		if planner != nil {
-			planner.RollbackEffects(ctx, preparedEff)
+			planner.RollbackEffects(ctx, plannedEffects)
 		}
 		return nil, NewSortChangesError(sortErr)
 	}
 	if err := r.validateDurableTransitionAgainstOverlays(allOps); err != nil {
 		if planner != nil {
-			planner.RollbackEffects(ctx, preparedEff)
+			planner.RollbackEffects(ctx, plannedEffects)
 		}
 		return nil, err
+	}
+	if expectedDigest != "" {
+		digest, err := previewDigest(allOps, historyOps, resolution, plannedEffects)
+		if err != nil || digest != expectedDigest {
+			if planner != nil {
+				planner.RollbackEffects(ctx, plannedEffects)
+			}
+			if err != nil {
+				return nil, err
+			}
+			return nil, NewPreviewConflictError(expectedDigest, digest)
+		}
+	}
+	if planner != nil {
+		var err error
+		preparedEff, err = planner.PrepareEffects(ctx, plannedEffects)
+		if err != nil {
+			planner.RollbackEffects(ctx, preparedEff)
+			return nil, NewPrepareEffectsError(err)
+		}
 	}
 
 	r.mu.Lock()

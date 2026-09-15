@@ -68,6 +68,19 @@ type Effect interface {
 	Rollback(context.Context) error
 }
 
+// PreviewEffect exposes the stable semantic identity of external work planned
+// by a directive. Registry previews reject effects without this measurement:
+// expanded entries alone cannot prove that a later apply will touch the same
+// files, sources, or other external targets.
+//
+// PreviewDigest must return a lowercase SHA-256 hex digest. It must exclude
+// ephemeral staging identities while covering every input that can change the
+// externally visible result of Prepare or Commit.
+type PreviewEffect interface {
+	Effect
+	PreviewDigest() (string, error)
+}
+
 // FinalizingEffect performs irreversible cleanup only after the registry state
 // and its history head are durably committed. Finalize must not be required for
 // correctness: a failure may leak temporary resources, but must not invalidate

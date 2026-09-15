@@ -38,11 +38,12 @@ func init() {
 	value.RegisterTypeMethods(nil, typeChanges,
 		map[string]lua.LGoFunc{"__tostring": changesToString},
 		map[string]lua.LGoFunc{
-			"ops":    changesOps,
-			"create": changesCreate,
-			"update": changesUpdate,
-			"delete": changesDelete,
-			"apply":  changesApply,
+			"ops":     changesOps,
+			"preview": changesPreview,
+			"create":  changesCreate,
+			"update":  changesUpdate,
+			"delete":  changesDelete,
+			"apply":   changesApply,
 		})
 
 	value.RegisterTypeMethods(nil, typeVersion,

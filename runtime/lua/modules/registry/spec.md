@@ -409,6 +409,7 @@ Returned by `snapshot:changes()`. Used to build and apply changesets.
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
 | ops | () | table[] | List of operations |
+| preview | () | table, error | Measure dependency-expanded operations without applying them |
 | create | (entry: table) | Changes | Add create operation |
 | update | (entry: table) | Changes | Add update operation |
 | delete | (id or id[]) | Changes | Add one or more delete operations |
@@ -421,6 +422,28 @@ Returns the list of operations in the changeset.
 **Returns:** Array of operation tables `{kind: string, entry: table}`
 
 Operation kinds: "entry.create", "entry.update", "entry.delete"
+
+#### changes:preview() → table, error
+
+Expands a current durable changeset through the same registry directives used
+by apply, then releases all staged resources without preparing effects,
+transitioning services, or writing history. The result contains `digest`, all
+expanded `changes`, the durable `history` subset, and the selected dependency
+`resolution` when present. Returned entries include registry-owned `owner` and
+`root` metadata.
+
+Every external effect must expose a stable semantic digest. Preview fails if an
+effect cannot prove the files, sources, or other external targets it selected.
+The caller needs `registry.preview`; ordinary `registry.get` permissions still
+filter every returned entry.
+
+After preview succeeds, `changes:apply()` re-expands under the registry writer
+lock and rejects a changed base, dependency selection, expanded operation, or
+effect target with retryable `errors.CONFLICT`. Mutating the changeset clears
+the reviewed digest and requires another preview.
+
+Only non-empty changesets from the current durable `registry.snapshot()` can be
+previewed. Historical and overlay snapshots are rejected.
 
 #### changes:create(entry: table) → Changes
 
@@ -501,6 +524,9 @@ Historical snapshots (`snapshot_at`) do not carry a current effective-state
 revision and cannot publish directly. Registry implementations without guarded
 snapshot writes also refuse this operation; there is no unguarded fallback.
 Overlay snapshots retain their separate owner-generation check.
+
+If `changes:preview()` was called, apply also requires that successful current
+preview and verifies its digest before preparing external effects.
 
 **Returns:**
 

@@ -90,6 +90,13 @@ func NewCommitEffectsError(err error, rollbackErr error) apierror.Error {
 		WithCause(err)
 }
 
+// NewPreviewConflictError rejects drift in a reviewed dependency expansion.
+func NewPreviewConflictError(expected, actual string) apierror.Error {
+	return apierror.New(apierror.Conflict, "registry expansion changed after preview").
+		WithRetryable(apierror.True).
+		WithDetails(attrs.NewBagFrom(map[string]any{"expected_digest": expected, "actual_digest": actual}))
+}
+
 // NewSnapshotRevisionConflictError rejects changes based on an older effective state.
 func NewSnapshotRevisionConflictError(expected, actual uint64) apierror.Error {
 	return apierror.New(apierror.Conflict, "registry snapshot is no longer current").
