@@ -21,8 +21,13 @@ type ResolvedModule struct {
 	Source    string
 	Digest    string
 	URL       string
-	SizeBytes uint64
-	Protected bool
+	// Repository and Commit are set for a module taken from a git repository
+	// (Source "git"): the repository as the dependency spelled it and the
+	// commit the version resolved to.
+	Repository string
+	Commit     string
+	SizeBytes  uint64
+	Protected  bool
 }
 
 type DependencySpec struct {

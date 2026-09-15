@@ -15,6 +15,7 @@ import (
 	regapi "github.com/wippyai/runtime/api/registry"
 	bootauth "github.com/wippyai/runtime/boot/deps/auth"
 	depconfig "github.com/wippyai/runtime/boot/deps/config"
+	"github.com/wippyai/runtime/boot/deps/gitsource"
 	"github.com/wippyai/runtime/boot/deps/graph"
 	"github.com/wippyai/runtime/boot/deps/hub"
 	"github.com/wippyai/runtime/boot/deps/lock"
@@ -149,12 +150,25 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	rootDeps := extractRootDependencies(entries, app.Transcoder)
 	logger.Info("found root dependencies", zap.Int("count", len(rootDeps)))
 
+	// The workspace lock carries the effective replacements; a git
+	// replacement's ref is resolved here, once per update.
+	workLock := oldLockObj
+	if workLock == nil {
+		workLock, err = lock.New(lockFilePath, lock.WithWorkspaceConfig(runtimeCfg))
+		if err != nil {
+			return NewLoadLockFileError(fmt.Errorf("lock file %s: %w", lockFilePath, err))
+		}
+	}
+	if err := resolveGitReplacements(app.Ctx, workLock, logger); err != nil {
+		return err
+	}
+
 	resolvedModules := make([]hub.ResolvedModule, 0)
 	if len(rootDeps) == 0 {
 		logger.Info("no root dependencies found in source, pruning lock modules")
 	} else {
 		logger.Info("resolving dependency graph")
-		result, err := resolveUpdatedWorkspaceDependencies(app.Ctx, hubClient, oldLockObj, lockFilePath, runtimeCfg, rootDeps, nil)
+		result, err := resolveUpdatedWorkspaceDependencies(app.Ctx, hubClient, workLock, lockFilePath, runtimeCfg, rootDeps, nil)
 		if err != nil {
 			return err
 		}
@@ -167,6 +181,9 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	newLockObj, err := convertResolvedToLock(lockFilePath, resolvedModules, modulesDir, srcDir)
 	if err != nil {
 		return NewLoadLockFileError(err)
+	}
+	if err := recordGitReplacements(newLockObj, workLock); err != nil {
+		return err
 	}
 
 	// Preserve all replacements from old lock file
@@ -201,9 +218,19 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 }
 
 type dependencyRequest struct {
+	Component  string // as declared: org/module, or a git repository
 	Org        string
 	Module     string
 	Constraint string
+}
+
+// component returns the declaration as the resolver takes it: the git
+// repository when one was declared, otherwise org/module.
+func (d dependencyRequest) component() string {
+	if d.Component != "" {
+		return d.Component
+	}
+	return d.Org + "/" + d.Module
 }
 
 func resolveUpdatedWorkspaceDependencies(
@@ -225,14 +252,16 @@ func resolveUpdatedWorkspaceDependencies(
 	definitions := make([]hub.DependencyDefinition, 0, len(roots))
 	for _, root := range roots {
 		definitions = append(definitions, hub.DependencyDefinition{
-			Component: root.Org + "/" + root.Module,
+			Component: root.component(),
 			Version:   root.Constraint,
 		})
 	}
 	handler, err := hub.NewDependencyHandler(hub.DependencyHandlerOptions{
 		Hub:                   provider,
 		LockPath:              lockObj.Path(),
+		GitCache:              lockObj.GitCacheRoot(),
 		WorkspaceReplacements: lockObj.GetReplacements(),
+		RefreshGitSources:     true,
 	})
 	if err != nil {
 		return nil, NewBuildDependencyGraphError(err)
@@ -267,7 +296,7 @@ func extractRootDependencies(entries []regapi.Entry, dtt payload.Transcoder) []d
 		}
 
 		parts := strings.SplitN(depData.Component, "/", 2)
-		if len(parts) != 2 {
+		if len(parts) != 2 && !gitsource.IsSource(depData.Component) {
 			continue
 		}
 
@@ -277,11 +306,14 @@ func extractRootDependencies(entries []regapi.Entry, dtt payload.Transcoder) []d
 		}
 		seen[key] = true
 
-		deps = append(deps, dependencyRequest{
-			Org:        parts[0],
-			Module:     parts[1],
+		request := dependencyRequest{
+			Component:  depData.Component,
 			Constraint: depData.Version,
-		})
+		}
+		if !gitsource.IsSource(depData.Component) {
+			request.Org, request.Module = parts[0], parts[1]
+		}
+		deps = append(deps, request)
 	}
 
 	return deps
@@ -300,11 +332,7 @@ func convertResolvedToLock(lockFilePath string, modules []hub.ResolvedModule, mo
 
 	lockedModules := make([]lock.Module, 0, len(modules))
 	for _, m := range modules {
-		lockedModules = append(lockedModules, lock.Module{
-			Name:    fmt.Sprintf("%s/%s", m.Org, m.Name),
-			Version: m.Version,
-			Hash:    m.Digest,
-		})
+		lockedModules = append(lockedModules, lockModuleFromResolved(m))
 	}
 	lockObj.ReplaceModules(lockedModules)
 
@@ -341,6 +369,9 @@ func runTargetedUpdate(cmd *cobra.Command, lockFilePath, srcDir, modulesDir stri
 		logger.Info("all requested modules are local replacements; nothing to update")
 		return nil
 	}
+	if err := resolveGitReplacements(app.Ctx, lockObj, logger); err != nil {
+		return err
+	}
 
 	// Scan app source plus local replacement sources to get constraints.
 	entries, err := loadDependencyScanEntries(app.Ctx, app.Loader, srcDir, lockObj, logger)
@@ -352,7 +383,7 @@ func runTargetedUpdate(cmd *cobra.Command, lockFilePath, srcDir, modulesDir stri
 	rootDeps := extractRootDependencies(entries, app.Transcoder)
 	sourceConstraints := make(map[string]string)
 	for _, dep := range rootDeps {
-		key := fmt.Sprintf("%s/%s", dep.Org, dep.Module)
+		key := rootModuleName(lockObj, dep)
 		sourceConstraints[key] = dep.Constraint
 	}
 
@@ -380,6 +411,9 @@ func runTargetedUpdate(cmd *cobra.Command, lockFilePath, srcDir, modulesDir stri
 	newLockObj, err := convertResolvedToLock(lockFilePath, resolvedModules, modulesDir, srcDir)
 	if err != nil {
 		return NewLoadLockFileError(err)
+	}
+	if err := recordGitReplacements(newLockObj, lockObj); err != nil {
+		return err
 	}
 
 	// Preserve all replacements from current lock file

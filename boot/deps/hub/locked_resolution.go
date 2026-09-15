@@ -26,7 +26,7 @@ func (h *DependencyHandler) lockedResolution(
 
 	selected := make(map[string]ResolvedModule, len(locked))
 	for _, mod := range locked {
-		if mod.Name == "" || mod.Version == "" || mod.Hash == "" {
+		if mod.Name == "" || mod.Version == "" || lockedDigest(mod) == "" {
 			return nil, false
 		}
 		if materializedVersions[mod.Name] != mod.Version {
@@ -36,6 +36,21 @@ func (h *DependencyHandler) lockedResolution(
 		name, err := graph.ParseName(mod.Name)
 		if err != nil {
 			return nil, false
+		}
+		if mod.IsGit() {
+			record := lockedGitRecord(mod)
+			if record.Digest == "" || record.Commit == "" {
+				return nil, false
+			}
+			if _, duplicate := selected[mod.Name]; duplicate {
+				return nil, false
+			}
+			selected[mod.Name] = ResolvedModule{
+				Org: name.Organization, Name: name.Module, Version: mod.Version,
+				Source: moduleSourceGit, Digest: record.Digest,
+				Repository: record.Repository, Commit: record.Commit,
+			}
+			continue
 		}
 		algorithm, digest, err := parseExpectedDigest(mod.Hash)
 		if err != nil || algorithm != "sha256" || len(digest) != 64 {

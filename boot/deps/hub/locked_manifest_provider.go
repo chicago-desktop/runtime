@@ -74,7 +74,7 @@ func (p *lockedManifestProvider) GetManifest(ctx context.Context, org, module, c
 	if err != nil {
 		return nil, err
 	}
-	deps, err := manifestDependenciesFromEntries(ctx, transcoder, entries)
+	deps, err := manifestDependenciesFromEntries(ctx, p.handler, transcoder, entries)
 	if err != nil {
 		return nil, fmt.Errorf("read locked manifest %s@%s: %w", name, mod.Version, err)
 	}
@@ -103,8 +103,13 @@ func (p *lockedManifestProvider) ListAllVersions(_ context.Context, org, module 
 	return versions, nil
 }
 
+// manifestDependenciesFromEntries reads a tree's declared dependencies. A
+// component naming a git repository is canonicalized to its module name
+// through the handler, so a transitive git dependency resolves like any
+// other module.
 func manifestDependenciesFromEntries(
 	ctx context.Context,
+	h *DependencyHandler,
 	transcoder payload.Transcoder,
 	entries []regapi.Entry,
 ) ([]ManifestDep, error) {
@@ -114,7 +119,7 @@ func manifestDependenciesFromEntries(
 		if entry.Kind != regapi.NamespaceDependency {
 			continue
 		}
-		def, err := decodeDependency(ctx, transcoder, entry)
+		def, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, err
 		}

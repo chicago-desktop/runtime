@@ -56,7 +56,7 @@ func (h *DependencyHandler) deploymentBaselineDigest(
 			}
 			_, replaced := h.replacements[mod.Name]
 			modules = append(modules, lockedModule{
-				Name: mod.Name, Version: mod.Version, Digest: mod.Hash,
+				Name: mod.Name, Version: mod.Version, Digest: lockedDigest(mod),
 				Root: mod.Root, Replacement: replaced,
 			})
 		}
@@ -70,7 +70,7 @@ func (h *DependencyHandler) deploymentBaselineDigest(
 		if entry.Kind != regapi.NamespaceDependency || !entry.Registry.Root {
 			continue
 		}
-		definition, err := decodeDependency(ctx, transcoder, entry)
+		definition, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return "", err
 		}
@@ -315,6 +315,7 @@ func resolvedModulesFromRecords(modules []regapi.ResolvedModule) ([]ResolvedModu
 		resolved = append(resolved, ResolvedModule{
 			Org: name.Organization, Name: name.Module, Version: mod.Version,
 			VersionID: mod.VersionID, Source: mod.Source, Digest: mod.Digest,
+			Repository: mod.Repository, Commit: mod.Commit,
 			SizeBytes: mod.SizeBytes, Protected: mod.Protected,
 		})
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/wippyai/runtime/boot/deps/artifact"
 	"github.com/wippyai/runtime/boot/deps/auth"
 	depconfig "github.com/wippyai/runtime/boot/deps/config"
+	"github.com/wippyai/runtime/boot/deps/gitsource"
 	"github.com/wippyai/runtime/boot/deps/graph"
 	"github.com/wippyai/runtime/boot/deps/lock"
 	"github.com/wippyai/runtime/boot/deps/wappextract"
@@ -47,16 +48,22 @@ const (
 )
 
 type DependencyHandlerOptions struct {
-	Hub                   HubClient
-	Resolver              regapi.DependencyResolver
-	Artifacts             *artifact.Registry
-	Logger                *zap.Logger
-	LockPath              string
-	VendorDir             string
-	ArtifactRoot          string
+	Hub          HubClient
+	Resolver     regapi.DependencyResolver
+	Artifacts    *artifact.Registry
+	Logger       *zap.Logger
+	LockPath     string
+	VendorDir    string
+	ArtifactRoot string
+	// GitCache is the root of the git source cache; empty selects the lock's
+	// default (WIPPY_GIT_CACHE, then $HOME/.wippy/git).
+	GitCache              string
 	WorkspaceReplacements []lock.Replacement
 	ResolveTimeout        time.Duration
 	DownloadTimeout       time.Duration
+	// RefreshGitSources lists a git source's tags again even when the lock
+	// already binds it: what wippy update does, and nothing else.
+	RefreshGitSources bool
 }
 
 type DependencyHandler struct {
@@ -67,6 +74,7 @@ type DependencyHandler struct {
 	lock            *lock.Lock
 	artifacts       *artifact.Registry
 	deployment      *regapi.Deployment
+	git             *gitState
 	artifactRoot    string
 	replacements    map[string]lock.Replacement
 	vendorDir       string
@@ -128,7 +136,9 @@ func NewDependencyHandler(opts DependencyHandlerOptions) (*DependencyHandler, er
 	var lockObj *lock.Lock
 	if lockPath != "" {
 		var err error
-		lockObj, err = lock.New(lockPath, lock.WithWorkspaceReplacements(opts.WorkspaceReplacements))
+		lockObj, err = lock.New(lockPath,
+			lock.WithGitCache(opts.GitCache),
+			lock.WithWorkspaceReplacements(opts.WorkspaceReplacements))
 		if err != nil {
 			return nil, err
 		}
@@ -154,6 +164,14 @@ func NewDependencyHandler(opts DependencyHandlerOptions) (*DependencyHandler, er
 		}
 	}
 
+	gitCacheRoot := opts.GitCache
+	if gitCacheRoot == "" && lockObj != nil {
+		gitCacheRoot = lockObj.GitCacheRoot()
+	}
+	if gitCacheRoot == "" {
+		gitCacheRoot = gitsource.DefaultRoot(filepath.Join(filepath.Dir(vendorDir), "git"))
+	}
+
 	return &DependencyHandler{
 		hub:             client,
 		manifestCache:   NewManifestCache(client),
@@ -166,6 +184,7 @@ func NewDependencyHandler(opts DependencyHandlerOptions) (*DependencyHandler, er
 		downloadTimeout: opts.DownloadTimeout,
 		lock:            lockObj,
 		replacements:    replacements,
+		git:             newGitState(gitsource.New(gitCacheRoot), opts.RefreshGitSources),
 	}, nil
 }
 
@@ -242,6 +261,14 @@ func (h *DependencyHandler) deploymentFromLock() (*regapi.Deployment, error) {
 	}
 	deployment := &regapi.Deployment{Root: roots[0], Modules: make([]regapi.ResolvedModule, 0, len(h.lock.GetModules()))}
 	for _, module := range h.lock.GetModules() {
+		if module.IsGit() {
+			record := lockedGitRecord(module)
+			if record.Digest == "" {
+				return nil, fmt.Errorf("deployment module %s has invalid tree digest", module.Name)
+			}
+			deployment.Modules = append(deployment.Modules, record)
+			continue
+		}
 		algorithm, digest, err := parseExpectedDigest(module.Hash)
 		if err != nil || algorithm != "sha256" || len(digest) != 64 {
 			return nil, fmt.Errorf("deployment module %s has invalid artifact digest", module.Name)
@@ -252,6 +279,29 @@ func (h *DependencyHandler) deploymentFromLock() (*regapi.Deployment, error) {
 		})
 	}
 	return deployment.Canonical(), nil
+}
+
+// lockedGitRecord renders a git module row of the lock as a stored module
+// record: source git, the tree digest as identity, repository and commit.
+func lockedGitRecord(module lock.Module) regapi.ResolvedModule {
+	digest := ""
+	if algorithm, value, err := parseExpectedDigest(module.LocalHash); err == nil && algorithm == "sha256-tree-v1" && len(value) == sha256.Size*2 {
+		digest = algorithm + ":" + strings.ToLower(value)
+	}
+	return regapi.ResolvedModule{
+		Name: module.Name, Version: module.Version,
+		Source: moduleSourceGit, Digest: digest,
+		Repository: module.Source, Commit: module.Commit,
+	}
+}
+
+// lockedDigest returns the digest a lock row pins: the artifact digest for a
+// Hub module, the tree digest for a git module.
+func lockedDigest(module lock.Module) string {
+	if module.IsGit() {
+		return module.LocalHash
+	}
+	return module.Hash
 }
 
 func (h *DependencyHandler) isDeploymentRoot(module string) bool {
@@ -785,7 +835,7 @@ func (h *DependencyHandler) ReconcileResolution(
 	baselineDigests := h.baselineModuleDigests()
 	touched := make(map[string]struct{}, len(desiredModules))
 	mutable := make(map[string]struct{}, len(desiredModules))
-	parameterModules, err := changedDependencyParameterModules(ctx, current, target, transcoder)
+	parameterModules, err := h.changedDependencyParameterModules(ctx, current, target, transcoder)
 	if err != nil {
 		return regapi.DirectiveResult{}, err
 	}
@@ -902,7 +952,7 @@ func (h *DependencyHandler) ReconcileResolution(
 // parameters differ across a history transition. Dependency parameters belong
 // to the referenced component's declared namespace and cannot mutate another
 // module, including through a fully qualified requirement ID.
-func changedDependencyParameterModules(
+func (h *DependencyHandler) changedDependencyParameterModules(
 	ctx context.Context,
 	current regapi.State,
 	target regapi.State,
@@ -919,7 +969,7 @@ func changedDependencyParameterModules(
 			if !isRootDependency(entry) {
 				continue
 			}
-			definition, err := decodeDependency(ctx, transcoder, entry)
+			definition, err := h.decodeDependency(ctx, transcoder, entry)
 			if err != nil {
 				return nil, err
 			}
@@ -995,13 +1045,15 @@ func dependencyResolution(roots, references []desiredDependency, modules []Resol
 			continue
 		}
 		resolved.Modules = append(resolved.Modules, regapi.ResolvedModule{
-			Name:      mod.Org + "/" + mod.Name,
-			Version:   mod.Version,
-			VersionID: mod.VersionID,
-			Source:    mod.Source,
-			Digest:    mod.Digest,
-			SizeBytes: mod.SizeBytes,
-			Protected: mod.Protected,
+			Name:       mod.Org + "/" + mod.Name,
+			Version:    mod.Version,
+			VersionID:  mod.VersionID,
+			Source:     mod.Source,
+			Digest:     mod.Digest,
+			Repository: mod.Repository,
+			Commit:     mod.Commit,
+			SizeBytes:  mod.SizeBytes,
+			Protected:  mod.Protected,
 		})
 	}
 	return resolved.Canonical()
@@ -1073,7 +1125,7 @@ func (h *DependencyHandler) collectResolutionDependencies(
 		if !ok {
 			return nil, nil, NewDependencyResolutionError(fmt.Errorf("stored dependency root %s is missing", root.ID))
 		}
-		definition, err := decodeDependency(ctx, transcoder, entry)
+		definition, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1105,7 +1157,7 @@ func (h *DependencyHandler) collectResolutionDependencies(
 		if !ok {
 			return nil, nil, NewDependencyResolutionError(fmt.Errorf("stored dependency reference %s is missing", reference.ID))
 		}
-		definition, err := decodeDependency(ctx, transcoder, entry)
+		definition, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1139,7 +1191,7 @@ func (h *DependencyHandler) collectSnapshotDependencies(
 		if !isRootDependency(entry) {
 			continue
 		}
-		def, err := decodeDependency(ctx, transcoder, entry)
+		def, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -1191,7 +1243,7 @@ func (h *DependencyHandler) collectDesiredDependencies(
 		if !isRootDependency(entry) {
 			break
 		}
-		def, err := decodeDependency(ctx, transcoder, entry)
+		def, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -1334,7 +1386,7 @@ func (h *DependencyHandler) installedModuleVersions(ctx context.Context, transco
 	if h.lock == nil {
 		return versions, nil
 	}
-	installedRoots, err := rootDependencyModules(ctx, transcoder, snapshot)
+	installedRoots, err := h.rootDependencyModules(ctx, transcoder, snapshot)
 	if err != nil {
 		return nil, err
 	}
@@ -1384,6 +1436,10 @@ func (h *DependencyHandler) resolveModules(
 	lockedVersions map[string]string,
 	resolution *regapi.DependencyResolution,
 ) ([]ResolvedModule, error) {
+	deps, err := h.canonicalizeDependencies(ctx, deps)
+	if err != nil {
+		return nil, err
+	}
 	roots := make([]DependencySpec, 0, len(deps))
 	for _, dep := range deps {
 		name, err := graph.ParseName(dep.Component)
@@ -1406,7 +1462,11 @@ func (h *DependencyHandler) resolveModules(
 	}
 	baselineDigests := h.baselineModuleDigests()
 	if regapi.DependencyAccessFromContext(ctx) == regapi.DependencyAccessVerifiedOffline {
+		// The locked provider already answers for git modules from their
+		// checkouts; a verified-offline startup lists no tags.
 		provider = newLockedManifestProvider(h, h.offlineModules(resolution))
+	} else {
+		provider = &gitManifestProvider{base: provider, handler: h}
 	}
 	provider = &replacementManifestProvider{
 		base:           provider,
@@ -1437,6 +1497,9 @@ func (h *DependencyHandler) resolveModules(
 			}
 		}
 		return nil, NewDependencyResolutionErrors(result.Errors)
+	}
+	if err := h.completeGitModuleIdentities(ctx, result.Modules); err != nil {
+		return nil, err
 	}
 	for _, mod := range result.Modules {
 		name := graph.Name{Organization: mod.Org, Module: mod.Name}
@@ -1550,11 +1613,19 @@ func (h *DependencyHandler) resolveEffectiveModules(
 			if parseErr != nil {
 				return nil, NewDependencyResolutionError(parseErr)
 			}
-			resolved = append(resolved, ResolvedModule{
+			lockedRoot := ResolvedModule{
 				Org: name.Organization, Name: name.Module,
 				Version: locked.Version, VersionID: locked.Version,
 				Digest: locked.Hash,
-			})
+			}
+			if locked.IsGit() {
+				lockedRoot.VersionID = ""
+				lockedRoot.Source = moduleSourceGit
+				lockedRoot.Digest = locked.LocalHash
+				lockedRoot.Repository = locked.Source
+				lockedRoot.Commit = locked.Commit
+			}
+			resolved = append(resolved, lockedRoot)
 			selected[locked.Name] = struct{}{}
 		}
 	}
@@ -1574,8 +1645,10 @@ func validateModuleArtifactIdentity(name graph.Name, version, digest string) err
 	if digest == "" {
 		return nil // Older hubs and local replacements did not always provide one.
 	}
+	// A Hub artifact carries a sha256; a tree (a git checkout or a local
+	// replacement) carries the tree digest. Both are content identities.
 	algorithm, value, err := parseExpectedDigest(digest)
-	if err != nil || algorithm != "sha256" || len(value) != sha256.Size*2 {
+	if err != nil || (algorithm != "sha256" && algorithm != "sha256-tree-v1") || len(value) != sha256.Size*2 {
 		return fmt.Errorf("invalid sha256 digest for %s@%s", name.String(), version)
 	}
 	if _, err := hex.DecodeString(value); err != nil {
@@ -1593,7 +1666,7 @@ func validateStoredModuleArtifactIdentity(name graph.Name, version, source, dige
 	}
 	algorithm, value, err := parseExpectedDigest(digest)
 	wantAlgorithm := "sha256"
-	if source == moduleSourceReplacementTreeV1 {
+	if source == moduleSourceReplacementTreeV1 || source == moduleSourceGit {
 		wantAlgorithm = "sha256-tree-v1"
 	} else if source != "" && source != moduleSourceHub {
 		return fmt.Errorf("stored module %s@%s has unsupported source %q", name.String(), version, source)
@@ -1872,7 +1945,7 @@ func (p *replacementManifestProvider) localReplacementDependencies(ctx context.C
 		return nil, err
 	}
 
-	return manifestDependenciesFromEntries(ctx, transcoder, entries)
+	return manifestDependenciesFromEntries(ctx, p.handler, transcoder, entries)
 }
 
 func loadReplacementEntries(
@@ -2014,7 +2087,7 @@ func (h *DependencyHandler) loadModuleEntries(ctx context.Context, modules []Res
 	entries := make([]regapi.Entry, 0)
 	plan := &unpackPlan{}
 	snapshotByID := entriesByID(snapshot)
-	installedRoots, err := rootDependencyModules(ctx, transcoder, snapshot)
+	installedRoots, err := h.rootDependencyModules(ctx, transcoder, snapshot)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -2058,13 +2131,13 @@ func entriesByID(entries regapi.State) map[string]regapi.Entry {
 	return byID
 }
 
-func rootDependencyModules(ctx context.Context, transcoder payload.Transcoder, entries regapi.State) (map[string]struct{}, error) {
+func (h *DependencyHandler) rootDependencyModules(ctx context.Context, transcoder payload.Transcoder, entries regapi.State) (map[string]struct{}, error) {
 	modules := make(map[string]struct{})
 	for _, entry := range entries {
 		if !isRootDependency(entry) {
 			continue
 		}
-		def, err := decodeDependency(ctx, transcoder, entry)
+		def, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, err
 		}
@@ -2103,7 +2176,7 @@ func (h *DependencyHandler) loadEntriesForModulePlan(ctx context.Context, transc
 		return nil, nil, err
 	}
 	var entries []regapi.Entry
-	if mod.Source == moduleSourceReplacementTreeV1 {
+	if mod.Source == moduleSourceReplacementTreeV1 || mod.Source == moduleSourceGit {
 		entries, err = loadReplacementEntries(ctx, modulePath, h.logger, transcoder)
 	} else {
 		entries, err = loadRawEntriesFromPaths(ctx, []string{modulePath}, h.logger, transcoder)
@@ -2156,7 +2229,7 @@ func (h *DependencyHandler) applyModuleConfigFilters(ctx context.Context, module
 
 func (h *DependencyHandler) materializeModuleForLoad(ctx context.Context, mod ResolvedModule) (string, *stagedModuleDirectory, error) {
 	moduleName := mod.Org + "/" + mod.Name
-	if _, replaced := h.replacementPath(moduleName); replaced || !h.shouldUnpackModules() {
+	if _, replaced := h.replacementPath(moduleName); replaced || mod.Source == moduleSourceGit || !h.shouldUnpackModules() {
 		path, err := h.ensureModuleAvailable(ctx, mod)
 		return path, nil, err
 	}
@@ -2243,6 +2316,9 @@ func (h *DependencyHandler) ensureModuleAvailable(ctx context.Context, mod Resol
 	moduleName := name.String()
 
 	if replacementPath, ok := h.replacementPath(moduleName); ok && (mod.Source == "" || mod.Source == moduleSourceReplacementTreeV1) {
+		if err := h.gitReplacementCheckout(ctx, moduleName, replacementPath); err != nil {
+			return "", err
+		}
 		stat, err := os.Stat(replacementPath)
 		if err != nil {
 			return "", NewDependencyLoadError(replacementPath, err)
@@ -2264,6 +2340,9 @@ func (h *DependencyHandler) ensureModuleAvailable(ctx context.Context, mod Resol
 	}
 	if mod.Source == moduleSourceReplacementTreeV1 {
 		return "", NewDependencyLoadError(moduleName, fmt.Errorf("stored local replacement is not configured"))
+	}
+	if mod.Source == moduleSourceGit {
+		return h.ensureGitModuleAvailable(ctx, mod)
 	}
 
 	expectedDigest, expectedSize := mod.Digest, mod.SizeBytes
@@ -2642,6 +2721,9 @@ func (h *DependencyHandler) moduleUsesDirectoryMode(moduleName string) bool {
 	if _, ok := h.replacementPath(moduleName); ok {
 		return true
 	}
+	if h.isGitModule(moduleName) {
+		return true
+	}
 	return h.shouldUnpackModules()
 }
 
@@ -2656,7 +2738,7 @@ func (h *DependencyHandler) operationModules(
 	if !ok || !isRootDependency(entry) {
 		return modules, nil
 	}
-	def, err := decodeDependency(ctx, transcoder, entry)
+	def, err := h.decodeDependency(ctx, transcoder, entry)
 	if err != nil {
 		return nil, err
 	}
@@ -2801,7 +2883,7 @@ func (h *DependencyHandler) baselineModuleDigests() map[string]string {
 	} else if h.lock != nil {
 		for _, module := range h.lock.GetModules() {
 			modules = append(modules, regapi.ResolvedModule{
-				Name: module.Name, Version: module.Version, Digest: module.Hash,
+				Name: module.Name, Version: module.Version, Digest: lockedDigest(module),
 			})
 		}
 	}

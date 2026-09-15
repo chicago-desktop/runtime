@@ -33,7 +33,7 @@ func (h *DependencyHandler) prepareRestoreSources(ctx context.Context, modules [
 			DeploymentRoot: h.isDeploymentRoot(name),
 			Replacement:    module.Source == moduleSourceReplacementTreeV1,
 		}
-		if source.Replacement {
+		if source.Replacement || module.Source == moduleSourceGit {
 			source.ResourceRoot = absolutePath
 		}
 		sources[name] = source

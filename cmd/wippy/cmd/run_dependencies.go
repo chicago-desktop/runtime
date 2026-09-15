@@ -12,6 +12,7 @@ import (
 	"github.com/wippyai/runtime/api/payload"
 	regapi "github.com/wippyai/runtime/api/registry"
 	"github.com/wippyai/runtime/api/semver"
+	"github.com/wippyai/runtime/boot/deps/gitsource"
 	"github.com/wippyai/runtime/boot/deps/hub"
 	"github.com/wippyai/runtime/boot/deps/lock"
 	bootloader "github.com/wippyai/runtime/boot/loader"
@@ -108,13 +109,8 @@ func prepareRunDependencies(
 	modules := make([]lock.Module, 0, len(resolved.Modules))
 	selected := make(map[string]struct{}, len(resolved.Modules))
 	for _, module := range resolved.Modules {
-		name := module.Org + "/" + module.Name
-		selected[name] = struct{}{}
-		modules = append(modules, lock.Module{
-			Name:    name,
-			Version: module.Version,
-			Hash:    module.Digest,
-		})
+		selected[module.Org+"/"+module.Name] = struct{}{}
+		modules = append(modules, lockModuleFromResolved(module))
 	}
 	// Retain selected replacement rows from legacy resolutions that did not
 	// return them while repairing unrelated dependencies.
@@ -127,6 +123,9 @@ func prepareRunDependencies(
 		}
 	}
 	lockObj.ReplaceModules(modules)
+	if err := recordGitReplacements(lockObj, lockObj); err != nil {
+		return err
+	}
 
 	// Download and verify the candidate graph before publishing it. Unpacked
 	// directories are refreshed only after the lock is committed, by the normal
@@ -146,12 +145,25 @@ func prepareRunDependencies(
 	return nil
 }
 
+// rootModuleName returns the module name a root declaration selects: the
+// component itself, or for a git repository the module the lock resolved it
+// to (the repository as written when the lock does not know it yet).
+func rootModuleName(lockObj *lock.Lock, root dependencyRequest) string {
+	component := root.component()
+	if lockObj != nil && gitsource.IsSource(component) {
+		if module, ok := lockObj.ModuleForSource(component); ok {
+			return module.Name
+		}
+	}
+	return component
+}
+
 func warnMissingRequiredWorkspaceReplacements(logger *zap.Logger, lockObj *lock.Lock, roots []dependencyRequest) {
 	if logger == nil || lockObj == nil {
 		return
 	}
 	for _, root := range roots {
-		name := root.Org + "/" + root.Module
+		name := rootModuleName(lockObj, root)
 		if _, replaced := lockObj.GetReplacement(name); !replaced {
 			continue
 		}
@@ -169,11 +181,20 @@ func lockMatchesResolution(lockObj *lock.Lock, resolved []hub.ResolvedModule) bo
 	}
 	for _, module := range resolved {
 		locked, ok := lockObj.GetModule(module.Org + "/" + module.Name)
-		if !ok || locked.Version != module.Version || !lockDigestsEqual(locked.Hash, module.Digest) {
+		if !ok || locked.Version != module.Version || !lockDigestsEqual(lockRowDigest(locked), module.Digest) {
 			return false
 		}
 	}
 	return true
+}
+
+// lockRowDigest is the content identity a lock row pins: the artifact
+// digest of a Hub module, the tree digest of a git checkout.
+func lockRowDigest(module lock.Module) string {
+	if module.IsGit() {
+		return module.LocalHash
+	}
+	return module.Hash
 }
 
 func lockDigestsEqual(left, right string) bool {
@@ -188,12 +209,12 @@ func lockSatisfiesSource(lockObj *lock.Lock, roots []dependencyRequest) bool {
 		return false
 	}
 	for _, root := range roots {
-		name := root.Org + "/" + root.Module
+		name := rootModuleName(lockObj, root)
 		module, ok := lockObj.GetModule(name)
 		if !ok || !lockedVersionSatisfies(module.Version, root.Constraint) {
 			return false
 		}
-		if _, replaced := lockObj.GetReplacement(name); !replaced && module.Hash == "" {
+		if _, replaced := lockObj.GetReplacement(name); !replaced && lockRowDigest(module) == "" {
 			return false
 		}
 	}
@@ -225,13 +246,14 @@ func resolveRunDependencies(
 	definitions := make([]hub.DependencyDefinition, 0, len(roots))
 	for _, root := range roots {
 		definitions = append(definitions, hub.DependencyDefinition{
-			Component: root.Org + "/" + root.Module,
+			Component: root.component(),
 			Version:   root.Constraint,
 		})
 	}
 	handler, err := hub.NewDependencyHandler(hub.DependencyHandlerOptions{
 		Hub:                   provider,
 		LockPath:              lockObj.Path(),
+		GitCache:              lockObj.GitCacheRoot(),
 		WorkspaceReplacements: lockObj.GetReplacements(),
 	})
 	if err != nil {

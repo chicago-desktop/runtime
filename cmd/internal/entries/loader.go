@@ -191,6 +191,12 @@ func ensureModulesInstalledFromLockWithClient(
 	// Check which modules need installation
 	var missingModules []lock.Module
 	for _, mod := range modules {
+		if mod.IsGit() {
+			if err := EnsureGitModuleCheckout(ctx, lockObj, mod, logger); err != nil {
+				return err
+			}
+			continue
+		}
 		if repl, ok := lockObj.GetReplacement(mod.Name); ok {
 			logger.Debug("module is replaced by local source; skipping auto-install",
 				zap.String("module", mod.Name),
@@ -512,9 +518,13 @@ func loadEntriesFromModulePaths(ctx context.Context, modulePaths []lock.ModuleLo
 	}
 
 	replacementOwners := make(map[string]struct{})
+	gitModules := make(map[string]string)
 	for _, mp := range modulePaths {
 		if mp.Replacement && mp.Module != "" {
 			replacementOwners[mp.Module] = struct{}{}
+		}
+		if mp.Source != "" && mp.Module != "" {
+			gitModules[mp.Source] = mp.Module
 		}
 	}
 
@@ -534,6 +544,9 @@ func loadEntriesFromModulePaths(ctx context.Context, modulePaths []lock.ModuleLo
 		loaded, err := loadEntriesFromModulePath(ctx, mp, ldr, dtt, logger)
 		if err != nil {
 			return nil, err
+		}
+		if err := canonicalizeGitComponents(loaded, gitModules, dtt); err != nil {
+			return nil, NewLoadFromPathError(mp.Path, err)
 		}
 
 		if shouldApplyModuleConfigFilters(mp) {

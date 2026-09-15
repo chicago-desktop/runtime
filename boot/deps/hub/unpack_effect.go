@@ -132,6 +132,11 @@ func (h *DependencyHandler) hasCurrentUnpackedModule(mod ResolvedModule) bool {
 		digest, size, err := digestReplacementTree(path)
 		return err == nil && strings.EqualFold(digest, mod.Digest) && (mod.SizeBytes == 0 || size == mod.SizeBytes)
 	}
+	if mod.Source == moduleSourceGit {
+		// A checkout is written once for its commit; present means current.
+		_, ok := h.gitCheckoutPath(mod)
+		return ok
+	}
 	if !h.shouldUnpackModules() {
 		return true
 	}

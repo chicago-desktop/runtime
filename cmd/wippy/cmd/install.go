@@ -114,10 +114,21 @@ func runInstall(cmd *cobra.Command, args []string) error {
 		logger.Warn("no matching modules found in lock file", zap.Strings("requested", args))
 		return nil
 	}
+	// Git modules come from the cache at the commit the lock records; a
+	// commit already checked out needs no network, and every checkout is
+	// verified against local_hash before anything loads it.
+	if selection.skippedGit > 0 {
+		checkedOut, err := ensureGitModules(app.Ctx, lockObj, logger)
+		if err != nil {
+			return err
+		}
+		logger.Info("git modules verified from cache", zap.Int("count", checkedOut))
+	}
 	if len(modules) == 0 {
-		if selection.skippedReplaced > 0 {
-			logger.Info("all selected modules are local replacements",
-				zap.Int("skipped_replaced", selection.skippedReplaced))
+		if selection.skippedReplaced > 0 || selection.skippedGit > 0 {
+			logger.Info("all selected modules are local replacements or git checkouts",
+				zap.Int("skipped_replaced", selection.skippedReplaced),
+				zap.Int("skipped_git", selection.skippedGit))
 		} else {
 			logger.Info("no remote modules to install")
 		}
@@ -348,7 +359,7 @@ func installedArtifactPacks(
 				continue
 			}
 		}
-		if _, replaced := lockObj.GetReplacement(module.Name); replaced {
+		if _, replaced := lockObj.GetReplacement(module.Name); replaced || module.IsGit() {
 			continue
 		}
 		name, err := graph.ParseName(module.Name)
@@ -392,6 +403,8 @@ func installedArtifactInputs(
 		return packs, nil, nil
 	}
 
+	// Directory sources: replacements and git checkouts alike declare their
+	// resources against the tree, not a packed artifact.
 	var replacementPaths []lock.ModuleLoadPath
 	versions := make(map[string]string)
 	for _, module := range lockObj.GetModules() {
@@ -403,7 +416,7 @@ func installedArtifactInputs(
 				continue
 			}
 		}
-		if _, replaced := lockObj.GetReplacement(modulePath.Module); replaced {
+		if _, replaced := lockObj.GetReplacement(modulePath.Module); replaced || modulePath.Source != "" {
 			replacementPaths = append(replacementPaths, modulePath)
 		}
 	}
@@ -445,6 +458,7 @@ type installSelection struct {
 	modules         []lock.Module
 	matched         int
 	skippedReplaced int
+	skippedGit      int
 }
 
 func selectInstallModules(lockObj *lock.Lock, requested []string, logger *zap.Logger) installSelection {
@@ -470,6 +484,14 @@ func selectInstallModules(lockObj *lock.Lock, requested []string, logger *zap.Lo
 		}
 		selection.matched++
 
+		if module.IsGit() {
+			logger.Info("module comes from a git repository; taken from the cache",
+				zap.String("module", module.Name),
+				zap.String("source", module.Source),
+				zap.String("commit", module.Commit))
+			selection.skippedGit++
+			continue
+		}
 		if repl, ok := lockObj.GetReplacement(module.Name); ok {
 			logger.Info("module is replaced by local source; skipping install",
 				zap.String("module", module.Name),

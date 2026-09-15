@@ -26,6 +26,18 @@ func NewModuleEmptyVersionError(moduleName string) apierror.Error {
 	return apierror.New(apierror.Invalid, fmt.Sprintf("module %q has empty version", moduleName))
 }
 
+func NewModuleMissingCommitError(moduleName, source string) apierror.Error {
+	return apierror.New(apierror.Invalid, fmt.Sprintf("module %q comes from %s but the lock records no commit; run wippy update", moduleName, source)).WithRetryable(apierror.False)
+}
+
+func NewModuleMissingLocalHashError(moduleName, source string) apierror.Error {
+	return apierror.New(apierror.Invalid, fmt.Sprintf("module %q comes from %s but the lock records no local_hash; run wippy update", moduleName, source)).WithRetryable(apierror.False)
+}
+
+func NewReplacementUnresolvedGitError(from, source string) apierror.Error {
+	return apierror.New(apierror.Invalid, fmt.Sprintf("replacement %q names %s but the lock records no commit for it; run wippy update", from, source)).WithRetryable(apierror.False)
+}
+
 func NewMultipleRootModulesError() apierror.Error {
 	return apierror.New(apierror.Invalid, "lock file selects more than one deployment root").WithRetryable(apierror.False)
 }

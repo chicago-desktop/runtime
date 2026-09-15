@@ -31,8 +31,13 @@ type ResolvedModule struct {
 	VersionID string `json:"version_id,omitempty"`
 	Source    string `json:"source,omitempty"`
 	Digest    string `json:"digest,omitempty"`
-	SizeBytes uint64 `json:"size_bytes,omitempty"`
-	Protected bool   `json:"protected,omitempty"`
+	// Repository and Commit identify a module taken from a git repository
+	// (Source "git"): the repository as the dependency spelled it and the
+	// commit the selected version resolved to. Both are empty for the Hub.
+	Repository string `json:"repository,omitempty"`
+	Commit     string `json:"commit,omitempty"`
+	SizeBytes  uint64 `json:"size_bytes,omitempty"`
+	Protected  bool   `json:"protected,omitempty"`
 }
 
 // Deployment records the source graph over which registry history is applied.

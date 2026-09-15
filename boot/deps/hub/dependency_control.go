@@ -32,7 +32,7 @@ func (h *DependencyHandler) collectControlledModules(
 		if entry.Kind != regapi.NamespaceDependency {
 			continue
 		}
-		def, err := decodeDependency(ctx, transcoder, entry)
+		def, err := h.decodeDependency(ctx, transcoder, entry)
 		if err != nil {
 			return nil, err
 		}

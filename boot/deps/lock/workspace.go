@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wippyai/runtime/api/boot"
+	"github.com/wippyai/runtime/boot/deps/gitsource"
 )
 
 const workspaceReplacementPrefix = "replacements."
@@ -22,6 +23,7 @@ func WithWorkspaceConfig(cfg boot.Config) Option {
 			return err
 		}
 		l.workspaceOverlay = append([]Replacement(nil), replacements...)
+		l.bindGitReplacements()
 		return nil
 	}
 }
@@ -62,6 +64,13 @@ func WorkspaceReplacements(cfg boot.Config) ([]Replacement, error) {
 		}
 		path = strings.TrimSpace(path)
 		if path == "" {
+			continue
+		}
+		if gitsource.IsSource(path) {
+			if _, err := gitsource.Parse(path); err != nil {
+				return nil, fmt.Errorf("workspace replacement %q: %w", module, err)
+			}
+			replacements = append(replacements, Replacement{From: module, Source: path})
 			continue
 		}
 		if configDir != "" && !filepath.IsAbs(path) {

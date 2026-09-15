@@ -73,6 +73,16 @@ func (h *DependencyHandler) buildSourceEffect(
 			root = replacement
 			path = lock.ModuleEntryLoadPath(root)
 			replacementSource = true
+		} else if mod.Source == moduleSourceGit {
+			// A git module's checkout is loaded as a directory replacement is,
+			// with the checkout as its resource root; an absent checkout is
+			// not a source yet.
+			checkout, ok := h.gitCheckoutPath(mod)
+			if !ok {
+				continue
+			}
+			root = checkout
+			path = lock.ModuleEntryLoadPath(root)
 		} else if h.shouldUnpackModules() {
 			var err error
 			root, err = containedPath(h.vendorDir, lock.ModulePath(name))

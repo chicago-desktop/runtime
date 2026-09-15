@@ -17,6 +17,7 @@ const DefaultFilename = "wippy.lock"
 // Lock represents a lock file with operations for reading, writing, and querying.
 type Lock struct {
 	path             string
+	gitCache         string
 	workspaceOverlay []Replacement
 	data             File
 }
@@ -30,6 +31,18 @@ type Option func(*Lock) error
 func WithWorkspaceReplacements(replacements []Replacement) Option {
 	return func(l *Lock) error {
 		l.workspaceOverlay = append([]Replacement(nil), replacements...)
+		l.bindGitReplacements()
+		return nil
+	}
+}
+
+// WithGitCache names the git cache root the lock derives checkout paths
+// from. Without it the default root applies (WIPPY_GIT_CACHE, then
+// $HOME/.wippy/git, then <modules dir>/git next to the lock).
+func WithGitCache(root string) Option {
+	return func(l *Lock) error {
+		l.gitCache = root
+		l.bindGitReplacements()
 		return nil
 	}
 }
@@ -409,6 +422,7 @@ type ModuleLoadPath struct {
 	Version     string // module version, empty for app source
 	Digest      string // selected module digest, empty for app and workspace-only source
 	SourceRoot  string // module root for module-relative resources; defaults to Path
+	Source      string // git repository the path is a checkout of, as the lock records it; empty otherwise
 	Root        bool   // selected deployment root from the lock graph
 	Replacement bool   // source is an effective workspace replacement
 }
@@ -453,6 +467,7 @@ func (l *Lock) GetModuleLoadPaths() []ModuleLoadPath {
 				Version:     selectedVersions[repl.From],
 				Digest:      selectedDigests[repl.From],
 				SourceRoot:  root,
+				Source:      repl.Source,
 				Root:        l.IsRootModule(repl.From),
 				Replacement: true,
 			})
@@ -469,6 +484,26 @@ func (l *Lock) GetModuleLoadPaths() []ModuleLoadPath {
 
 		name, err := graph.ParseName(mod.Name)
 		if err != nil {
+			continue
+		}
+
+		if mod.IsGit() {
+			// A git module is loaded from its checkout exactly as a directory
+			// replacement is; the checkout is materialized by install or the
+			// boot's module check before this path is read.
+			root, ok := l.GitCheckoutDir(mod)
+			if !ok {
+				continue
+			}
+			paths = append(paths, ModuleLoadPath{
+				Path:       ModuleEntryLoadPath(root),
+				Module:     mod.Name,
+				Version:    mod.Version,
+				Digest:     mod.LocalHash,
+				SourceRoot: root,
+				Source:     mod.Source,
+				Root:       mod.Root,
+			})
 			continue
 		}
 

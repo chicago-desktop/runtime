@@ -53,7 +53,7 @@ func (h *DependencyHandler) currentModuleIdentities(ctx context.Context) (map[st
 			versions[module.Name] = module.Version
 		}
 		if _, exists := digests[module.Name]; !exists {
-			digests[module.Name] = module.Hash
+			digests[module.Name] = lockedDigest(module)
 		}
 	}
 	return versions, digests
@@ -82,6 +82,10 @@ func (h *DependencyHandler) offlineModules(resolution *regapi.DependencyResoluti
 	}
 	if h != nil && h.lock != nil {
 		for _, locked := range h.lock.GetModules() {
+			if locked.IsGit() {
+				modules = append(modules, lockedGitRecord(locked))
+				continue
+			}
 			modules = append(modules, regapi.ResolvedModule{
 				Name: locked.Name, Version: locked.Version, VersionID: locked.Version,
 				Source: moduleSourceHub, Digest: locked.Hash,

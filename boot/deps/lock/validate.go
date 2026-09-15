@@ -3,9 +3,12 @@
 package lock
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/wippyai/runtime/boot/deps/gitsource"
 )
 
 // Validate validates the entire lock file structure.
@@ -20,6 +23,20 @@ func Validate(l *Lock) error {
 
 		if mod.Version == "" {
 			return NewModuleEmptyVersionError(mod.Name)
+		}
+		if mod.IsGit() {
+			if _, err := gitsource.Parse(mod.Source); err != nil {
+				return NewInvalidModuleError(mod.Name, err)
+			}
+			if mod.Commit == "" {
+				return NewModuleMissingCommitError(mod.Name, mod.Source)
+			}
+			if !gitsource.IsCommit(mod.Commit) {
+				return NewInvalidModuleError(mod.Name, fmt.Errorf("commit %q is not a full commit id", mod.Commit))
+			}
+			if mod.LocalHash == "" {
+				return NewModuleMissingLocalHashError(mod.Name, mod.Source)
+			}
 		}
 		if mod.Root {
 			rootCount++
@@ -62,7 +79,7 @@ func validateReplacements(lockPath string, replacements []Replacement, selected 
 			return ErrReplacementFromEmpty
 		}
 
-		if r.To == "" {
+		if r.To == "" && !r.IsGit() {
 			return NewReplacementToEmptyError(r.From)
 		}
 
@@ -73,6 +90,14 @@ func validateReplacements(lockPath string, replacements []Replacement, selected 
 			if _, ok := selected[r.From]; !ok {
 				continue
 			}
+		}
+		if r.IsGit() {
+			// The checkout is materialized by install or the boot's module
+			// check, after validation; only an unresolved ref is refused here.
+			if r.To == "" {
+				return NewReplacementUnresolvedGitError(r.From, r.Source)
+			}
+			continue
 		}
 
 		replacementPath := ResolveLockPath(lockDir, r.To)
