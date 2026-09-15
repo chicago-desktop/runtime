@@ -24,18 +24,29 @@ func (h *DependencyHandler) buildArtifactEffect(
 	}
 
 	packs := make([]artifact.WAPP, 0, len(resolved))
-	replacementVersions := make(map[string]string)
+	directoryVersions := make(map[string]string)
+	directoryRoots := make(map[string]string)
 	seen := make(map[string]struct{}, len(resolved))
 	for _, module := range resolved {
 		moduleName := module.Org + "/" + module.Name
-		if _, replaced := h.replacementPath(moduleName); replaced ||
+		if root, replaced := h.replacementPath(moduleName); replaced ||
 			module.Source == moduleSourceReplacementTreeV1 {
-			replacementVersions[moduleName] = module.Version
+			directoryVersions[moduleName] = module.Version
+			if replaced {
+				directoryRoots[moduleName] = root
+			}
 			continue
 		}
 		path, err := h.ensureModuleAvailable(ctx, module)
 		if err != nil {
 			return nil, err
+		}
+		if module.Source == moduleSourceGit {
+			// A git checkout is a source directory, never an archive: its
+			// declared resources resolve against the tree as a replacement's do.
+			directoryVersions[moduleName] = module.Version
+			directoryRoots[moduleName] = path
+			continue
 		}
 		if _, exists := seen[path]; exists {
 			continue
@@ -46,27 +57,13 @@ func (h *DependencyHandler) buildArtifactEffect(
 			ModuleVersion: module.Version,
 		})
 	}
-	resources, err := h.replacementArtifactResources(ctx, state, replacementVersions)
-	if err != nil {
-		return nil, err
-	}
-	return artifact.NewEffect(h.artifacts, packs, resources, h.artifactRoot)
-}
-
-func (h *DependencyHandler) replacementArtifactResources(
-	ctx context.Context,
-	state regapi.State,
-	versions map[string]string,
-) ([]artifact.Resource, error) {
-	if len(versions) == 0 {
-		return nil, nil
-	}
-	roots := make(map[string]string, len(versions))
-	for module := range versions {
-		root, ok := h.replacementPath(module)
-		if ok {
-			roots[module] = root
+	var resources []artifact.Resource
+	if len(directoryVersions) > 0 {
+		var err error
+		resources, err = artifact.DirectoryResources(ctx, state, directoryRoots, directoryVersions)
+		if err != nil {
+			return nil, err
 		}
 	}
-	return artifact.DirectoryResources(ctx, state, roots, versions)
+	return artifact.NewEffect(h.artifacts, packs, resources, h.artifactRoot)
 }

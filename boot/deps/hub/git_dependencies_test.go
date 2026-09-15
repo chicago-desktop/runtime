@@ -339,3 +339,70 @@ func mustParse(t *testing.T, value string) gitsource.Source {
 	require.NoError(t, err)
 	return src
 }
+
+// TestGitDependency_CanonicalRootKeepsGitIdentity is the boot: the loader has
+// already rewritten the component to the module name, so the handler sees
+// acme/widget, not the repository. The lock's git row must still make the
+// module a git module - source, commit, tree digest - or identity completion
+// refuses it as a Hub artifact with the wrong digest.
+func TestGitDependency_CanonicalRootKeepsGitIdentity(t *testing.T) {
+	repo := widgetRepo(t)
+	w := newGitWorkspace(t)
+
+	online, err := w.handler(t, true).ResolveWorkspaceDependencies(newTestContext(), []DependencyDefinition{
+		{Component: repo.Source(""), Version: "^0.1.0"},
+	})
+	require.NoError(t, err)
+	w.record(t, online)
+
+	for name, ctx := range map[string]context.Context{"online": newTestContext(), "offline": offlineContext()} {
+		t.Run(name, func(t *testing.T) {
+			handler := w.handler(t, false)
+			resolved, err := handler.resolveEffectiveModules(ctx, []DependencyDefinition{
+				{Component: "acme/widget", Version: "^0.1.0"},
+			}, map[string]string{"acme/widget": "0.1.3"}, nil)
+			require.NoError(t, err)
+			require.Len(t, resolved, 1)
+			assert.Equal(t, moduleSourceGit, resolved[0].Source)
+			assert.Equal(t, repo.Source(""), resolved[0].Repository)
+			assert.Equal(t, repo.Commits["v0.1.3"], resolved[0].Commit)
+			assert.Equal(t, online[0].Digest, resolved[0].Digest)
+			assert.Zero(t, w.hubCalls, "the lock names the repository; the Hub is never asked")
+		})
+	}
+}
+
+// TestGitDependency_UpdateFollowsMovedTag: a tag re-pointed upstream is what
+// wippy update exists to pick up; the tree the lock pinned is being replaced,
+// not a bound the new tree must match.
+func TestGitDependency_UpdateFollowsMovedTag(t *testing.T) {
+	repo := widgetRepo(t)
+	w := newGitWorkspace(t)
+
+	first, err := w.handler(t, true).ResolveWorkspaceDependencies(newTestContext(), []DependencyDefinition{
+		{Component: repo.Source(""), Version: "*"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, repo.Commits["0.2.0"], first[0].Commit)
+	w.record(t, first)
+
+	moved := repo.Commit(t, "0.2.0", map[string]string{"src/_index.json": gittest.Index("acme.widget"), "src/note.txt": "re-tagged\n"})
+	repo.Git(t, repo.Work, "tag", "-f", "0.2.0")
+	repo.Git(t, repo.Work, "push", "--quiet", "--force", repo.Bare, "main", "--tags")
+
+	second, err := w.handler(t, true).ResolveWorkspaceDependencies(newTestContext(), []DependencyDefinition{
+		{Component: repo.Source(""), Version: "*"},
+	})
+	require.NoError(t, err)
+	require.Len(t, second, 1)
+	assert.Equal(t, "0.2.0", second[0].Version)
+	assert.Equal(t, moved, second[0].Commit)
+	assert.NotEqual(t, first[0].Digest, second[0].Digest)
+
+	// Not refreshing (the boot, a plain run): the lock's commit stands.
+	pinned, err := w.handler(t, false).ResolveWorkspaceDependencies(offlineContext(), []DependencyDefinition{
+		{Component: repo.Source(""), Version: "*"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, first[0].Commit, pinned[0].Commit)
+}

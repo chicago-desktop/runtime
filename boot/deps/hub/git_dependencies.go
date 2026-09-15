@@ -179,25 +179,7 @@ func (h *DependencyHandler) isGitModule(name string) bool {
 	if _, replaced := h.replacementPath(name); replaced {
 		return false
 	}
-	h.gitState().mu.Lock()
-	_, bound := h.gitState().byName[name]
-	h.gitState().mu.Unlock()
-	if bound {
-		return true
-	}
-	if h.lock != nil {
-		if mod, ok := h.lock.GetModule(name); ok && mod.IsGit() {
-			return true
-		}
-	}
-	if h.deployment != nil {
-		for _, mod := range h.deployment.Modules {
-			if mod.Name == name {
-				return mod.Source == moduleSourceGit
-			}
-		}
-	}
-	return false
+	return h.gitBindingForModule(name) != nil
 }
 
 // decodeDependency decodes an ns.dependency entry and canonicalizes a git
@@ -348,6 +330,55 @@ func (h *DependencyHandler) gitBindingByName(name string) *gitBinding {
 	return h.gitState().byName[name]
 }
 
+// gitBindingForModule returns the binding of a module by name, making one
+// from the lock or the deployment when the module is recorded as taken from
+// git but no declaration spelled its repository in this process: the boot
+// loader rewrites git components to module names before the handler sees
+// them, and a lock pins a git module by name.
+func (h *DependencyHandler) gitBindingForModule(name string) *gitBinding {
+	if binding := h.gitBindingByName(name); binding != nil {
+		return binding
+	}
+	if _, replaced := h.replacementPath(name); replaced {
+		return nil
+	}
+	var repository, version, commit string
+	if h.lock != nil {
+		if mod, ok := h.lock.GetModule(name); ok && mod.IsGit() && mod.Commit != "" {
+			repository, version, commit = mod.Source, normalizeGitVersion(mod.Version), mod.Commit
+		}
+	}
+	if repository == "" && h.deployment != nil {
+		for _, mod := range h.deployment.Modules {
+			if mod.Name == name && mod.Source == moduleSourceGit && mod.Commit != "" {
+				repository, version, commit = mod.Repository, normalizeGitVersion(mod.Version), mod.Commit
+				break
+			}
+		}
+	}
+	if repository == "" {
+		return nil
+	}
+	src, err := gitsource.Parse(repository)
+	if err != nil {
+		return nil
+	}
+	h.gitState().mu.Lock()
+	defer h.gitState().mu.Unlock()
+	if binding := h.gitState().byName[name]; binding != nil {
+		return binding
+	}
+	binding, err := h.registerGitBinding(&gitBinding{
+		source:  src,
+		name:    name,
+		commits: map[string]string{version: commit},
+	})
+	if err != nil {
+		return nil
+	}
+	return binding
+}
+
 // gitBindingCommit returns the commit a version of a bound module resolves
 // to: from the binding's tags, the lock, or — online — a fresh tag listing.
 func (h *DependencyHandler) gitBindingCommit(ctx context.Context, binding *gitBinding, version string) (string, error) {
@@ -485,7 +516,7 @@ func (h *DependencyHandler) completeGitModuleIdentities(ctx context.Context, mod
 		if _, replaced := h.replacementPath(name); replaced {
 			continue
 		}
-		binding := h.gitBindingByName(name)
+		binding := h.gitBindingForModule(name)
 		if binding == nil {
 			continue
 		}
@@ -526,7 +557,7 @@ type gitManifestProvider struct {
 
 func (p *gitManifestProvider) ListAllVersions(ctx context.Context, org, module string) ([]VersionInfo, error) {
 	name := org + "/" + module
-	binding := p.handler.gitBindingByName(name)
+	binding := p.handler.gitBindingForModule(name)
 	if binding == nil {
 		return p.base.ListAllVersions(ctx, org, module)
 	}
@@ -547,7 +578,7 @@ func (p *gitManifestProvider) ListAllVersions(ctx context.Context, org, module s
 
 func (p *gitManifestProvider) GetManifest(ctx context.Context, org, module, constraint string) (*ModuleManifest, error) {
 	name := org + "/" + module
-	binding := p.handler.gitBindingByName(name)
+	binding := p.handler.gitBindingForModule(name)
 	if binding == nil {
 		return p.base.GetManifest(ctx, org, module, constraint)
 	}

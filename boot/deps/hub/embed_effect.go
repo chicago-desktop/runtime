@@ -159,7 +159,7 @@ func (h *DependencyHandler) buildEmbedPackEffect(
 	staged := make([]stagedPack, 0, len(resolved))
 	for _, mod := range resolved {
 		name := mod.Org + "/" + mod.Name
-		if h.moduleUsesDirectoryMode(name) {
+		if mod.Source == moduleSourceGit || h.moduleUsesDirectoryMode(name) {
 			continue
 		}
 
@@ -242,7 +242,7 @@ func obsoletePacksFor(current, desired map[string]string, controlled map[string]
 // and whether that path is a .wapp pack. Replacement (local source) and
 // unpacked modules are directories and are reported as non-pack.
 func (h *DependencyHandler) modulePackPath(ctx context.Context, mod ResolvedModule) (string, bool, error) {
-	if h.moduleUsesDirectoryMode(mod.Org + "/" + mod.Name) {
+	if mod.Source == moduleSourceGit || h.moduleUsesDirectoryMode(mod.Org+"/"+mod.Name) {
 		return "", false, nil
 	}
 	path, err := h.ensureModuleAvailable(ctx, mod)

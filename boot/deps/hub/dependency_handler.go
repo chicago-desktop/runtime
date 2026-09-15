@@ -1461,6 +1461,15 @@ func (h *DependencyHandler) resolveModules(
 		provider = h.manifestCache
 	}
 	baselineDigests := h.baselineModuleDigests()
+	if h.gitState().refresh {
+		// wippy update re-resolves git modules from their tags; the tree the
+		// lock pinned is what is being replaced, not a bound to hold to.
+		for key := range baselineDigests {
+			if strings.HasPrefix(baselineDigests[key], "sha256-tree-v1:") {
+				delete(baselineDigests, key)
+			}
+		}
+	}
 	if regapi.DependencyAccessFromContext(ctx) == regapi.DependencyAccessVerifiedOffline {
 		// The locked provider already answers for git modules from their
 		// checkouts; a verified-offline startup lists no tags.

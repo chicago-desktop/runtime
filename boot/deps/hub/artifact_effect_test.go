@@ -280,3 +280,104 @@ func writeDependencyArtifactWAPPVersion(t *testing.T, path, version, content str
 		t.Fatal(closeErr)
 	}
 }
+
+// TestBuildArtifactEffectTreatsGitCheckoutAsDirectory is the boot path a git
+// module takes through effect preparation: the checkout is a source tree,
+// never an archive, so its declared resources resolve against the tree the
+// way a replacement's do instead of being read as a WAPP.
+func TestBuildArtifactEffectTreatsGitCheckoutAsDirectory(t *testing.T) {
+	root := t.TempDir()
+	cache := filepath.Join(root, "git-cache")
+	const (
+		source = "github.com/example/package"
+		commit = "24daf913c658925a3955a3e923c7c7e20bccbdc5"
+	)
+	checkout := filepath.Join(cache, "github.com", "example", "package", "checkouts", commit)
+	if err := os.MkdirAll(filepath.Join(checkout, "dist"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "wippy.yaml"), []byte("organization: example\nmodule: package\nversion: 1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "package.json"), []byte(`{"name":"@example/package","version":"1.0.0"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "dist", "index.js"), []byte("from git"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	digest, _, err := digestReplacementTree(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockPath := filepath.Join(root, lock.DefaultFilename)
+	lockObj, err := lock.New(lockPath, lock.WithGitCache(cache))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockObj.SetDirectories(lock.Directories{Modules: ".wippy", Src: "src"})
+	lockObj.SetModule(lock.Module{Name: "example/package", Version: "1.0.0", Source: source, Commit: commit, LocalHash: digest})
+	if err := lockObj.Write(); err != nil {
+		t.Fatal(err)
+	}
+
+	registry := artifact.NewRegistry()
+	if err := registry.Register(nodepackage.New()); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := NewDependencyHandler(DependencyHandlerOptions{
+		Hub:          &fakeHub{},
+		Artifacts:    registry,
+		ArtifactRoot: root,
+		LockPath:     lockPath,
+		GitCache:     cache,
+		Logger:       zap.NewNop(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := regapi.State{{
+		ID:       regapi.NewID("example.package", "artifact"),
+		Kind:     dirapi.Kind,
+		Registry: regapi.EntryMetadata{Owner: "example/package"},
+		Meta: attrs.NewBagFrom(map[string]any{
+			"artifact": map[string]any{"format": "node-package"},
+		}),
+		Data: payload.New(map[string]any{
+			"directory": ".",
+			"base":      dirapi.BaseModule,
+		}),
+	}}
+	// The module as the lock describes it, which is how the boot sees it.
+	resolved, ok := handler.lockedResolution(nil, map[string]string{"example/package": "1.0.0"})
+	if !ok || len(resolved) != 1 {
+		t.Fatalf("locked resolution = %+v, %v", resolved, ok)
+	}
+	effect, err := handler.buildArtifactEffect(newTestContext(), resolved, state)
+	if err != nil {
+		t.Fatalf("build artifact effect: %v", err)
+	}
+	if err := effect.Prepare(context.Background()); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if err := effect.Commit(context.Background()); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if finalizer, ok := effect.(regapi.FinalizingEffect); ok {
+		if err := finalizer.Finalize(context.Background()); err != nil {
+			t.Fatalf("finalize: %v", err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(root, "npm", "@example", "package", "dist", "index.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "from git" {
+		t.Fatalf("materialized content = %q", data)
+	}
+
+	// The embed effect must not open the checkout as a pack either.
+	if path, isWapp, err := handler.modulePackPath(newTestContext(), resolved[0]); err != nil || isWapp || path != "" {
+		t.Fatalf("modulePackPath = %q, %v, %v; want no pack for a git checkout", path, isWapp, err)
+	}
+}
