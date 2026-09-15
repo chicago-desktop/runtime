@@ -82,6 +82,7 @@ func ModuleTypes() *typio.Manifest {
 			OptParam("options", typ.NewRecord().
 				OptField("size", typ.Number).
 				OptField("smooth", typ.Boolean).
+				OptField("kerning", typ.Boolean).
 				Build()).
 			Returns(fontType).Build()},
 	}))

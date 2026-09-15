@@ -15,6 +15,7 @@ import (
 	"golang.org/x/image/font/gofont/goregular"
 	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
+	"golang.org/x/image/math/fixed"
 )
 
 // The Go font travels as a byte slice inside x/image, so these tests depend
@@ -35,11 +36,25 @@ func testFont(t *testing.T, size float64) *Font {
 	}
 	metrics := face.Metrics()
 	return &Font{
-		face:   face,
-		size:   size,
-		height: metrics.Height.Ceil(),
-		ascent: metrics.Ascent.Ceil(),
+		face:    face,
+		size:    size,
+		height:  metrics.Height.Ceil(),
+		ascent:  metrics.Ascent.Ceil(),
+		kerning: true,
 	}
+}
+
+// kernedFace gives the test font a pair adjustment it does not have: the Go
+// font carries no kerning at all, so without this a kerning test would pass
+// whatever the code did. "To" is pulled in by three pixels, the way the
+// interface font pulls it in by four at 13 px.
+type kernedFace struct{ font.Face }
+
+func (k kernedFace) Kern(previous, current rune) fixed.Int26_6 {
+	if previous == 'T' && current == 'o' {
+		return fixed.I(-3)
+	}
+	return 0
 }
 
 func testRaster(width, height int) *Raster {
@@ -229,6 +244,81 @@ func TestMeasureMatchesWhatGetsDrawn(t *testing.T) {
 
 	if difference := measured - drawn; difference > 2 || difference < -2 {
 		t.Fatalf("measure says %d, drawing advanced %d", measured, drawn)
+	}
+}
+
+func TestKerningCanBeTurnedOff(t *testing.T) {
+	// The pair adjustment is the font's, and at interface sizes it can pull a
+	// letter halfway under the one before it. Off, the letters stand on their
+	// advances; on, the pair closes up. Measuring follows drawing either way.
+	for _, tc := range []struct {
+		name    string
+		kerning bool
+		pull    int
+	}{
+		{"kerning on", true, 3},
+		{"kerning off", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := testFont(t, 13)
+			f.face = kernedFace{f.face}
+			f.kerning = tc.kerning
+			t0, _ := f.face.GlyphAdvance('T')
+			o0, _ := f.face.GlyphAdvance('o')
+			want := (t0 + o0).Ceil() - tc.pull
+
+			drawn := drawText(testRaster(100, 30), f, 0, 0, "To", black, false)
+			measured := measureText(f, "To").Ceil()
+
+			if drawn != want {
+				t.Fatalf("drawing advanced %d, want %d", drawn, want)
+			}
+			if measured != drawn {
+				t.Fatalf("measure says %d, drawing advanced %d", measured, drawn)
+			}
+		})
+	}
+}
+
+func TestLuaFontKerningOption(t *testing.T) {
+	// The option reaches the face through gfx.font, and leaving it out keeps
+	// the old behaviour: a caller that never heard of it sees nothing change.
+	l := lua.NewState()
+	defer l.Close()
+	mod, _ := buildModule()
+	l.SetGlobal("gfx", mod)
+	l.SetGlobal("font_bytes", lua.LString(goregular.TTF))
+	if err := l.DoString(`
+		plain = gfx.font(font_bytes, {size = 13})
+		flat = gfx.font(font_bytes, {size = 13, kerning = false})
+	`); err != nil {
+		t.Fatal(err)
+	}
+	for name, want := range map[string]bool{"plain": true, "flat": false} {
+		ud, ok := l.GetGlobal(name).(*lua.LUserData)
+		if !ok {
+			t.Fatalf("%s is not a font", name)
+		}
+		if got := ud.Value.(*Font).kerning; got != want {
+			t.Fatalf("%s: kerning %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestMeasureWalksLikeDrawing(t *testing.T) {
+	// measure and text share one walk: the kerning rule and the gap for a
+	// missing rune. A mixed line must come out the same width both ways, to
+	// the pixel, with kerning on and off.
+	for _, kerning := range []bool{true, false} {
+		f := testFont(t, 13)
+		f.face = kernedFace{f.face}
+		f.kerning = kerning
+		const text = "To Панель\U0001F600 Tools"
+		measured := measureText(f, text).Ceil()
+		drawn := drawText(testRaster(400, 30), f, 0, 0, text, black, false)
+		if measured != drawn {
+			t.Fatalf("kerning=%v: measure says %d, drawing advanced %d", kerning, measured, drawn)
+		}
 	}
 }
 

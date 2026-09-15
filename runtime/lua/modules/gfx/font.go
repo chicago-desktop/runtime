@@ -60,6 +60,11 @@ type Font struct {
 	ascent int
 	mu     sync.Mutex
 	smooth bool
+	// kerning applies the font's pair adjustments between letters. On by
+	// default; an interface drawn in the manner of the bitmap system fonts
+	// turns it off, because at 13 px a pair like "To" is pulled in by half a
+	// letter and the two glyphs read as one.
+	kerning bool
 }
 
 func init() {
@@ -75,6 +80,8 @@ func init() {
 
 // gfxFontNew parses font bytes at a size. The optional smooth flag supplies
 // the default for raster:text; each draw can still override it explicitly.
+// `kerning = false` lays the letters out by their advances alone, in drawing
+// and in measuring alike.
 func gfxFontNew(l *lua.LState) int {
 	data := l.CheckString(1)
 	if len(data) == 0 {
@@ -88,8 +95,10 @@ func gfxFontNew(l *lua.LState) int {
 
 	size := 12.0
 	smooth := false
+	kerning := true
 	if options, ok := l.Get(2).(*lua.LTable); ok && options != nil {
 		smooth = optionBool(options, "smooth", false)
+		kerning = optionBool(options, "kerning", true)
 		if raw := options.RawGetString("size"); raw != lua.LNil {
 			number, ok := numberValue(raw)
 			if !ok {
@@ -129,12 +138,13 @@ func gfxFontNew(l *lua.LState) int {
 	metrics := face.Metrics()
 
 	value.PushTypedUserData(l, &Font{
-		face:   face,
-		size:   size,
-		name:   name,
-		height: metrics.Height.Ceil(),
-		ascent: metrics.Ascent.Ceil(),
-		smooth: smooth,
+		face:    face,
+		size:    size,
+		name:    name,
+		height:  metrics.Height.Ceil(),
+		ascent:  metrics.Ascent.Ceil(),
+		smooth:  smooth,
+		kerning: kerning,
 	}, fontTypeName)
 	return 1
 }
@@ -212,7 +222,7 @@ func fontMeasure(l *lua.LState) int {
 	text := l.CheckString(2)
 
 	f.mu.Lock()
-	width := font.MeasureString(f.face, text)
+	width := measureText(f, text)
 	f.mu.Unlock()
 
 	l.Push(lua.LNumber(width.Ceil()))
@@ -282,7 +292,7 @@ func drawText(raster *Raster, f *Font, x, y int, text string, paint color.RGBA, 
 
 	var previous rune
 	for index, current := range text {
-		if index > 0 {
+		if index > 0 && f.kerning {
 			dot.X += f.face.Kern(previous, current)
 		}
 		bounds, mask, maskPoint, advance, ok := f.face.Glyph(dot, current)
@@ -308,6 +318,26 @@ func drawText(raster *Raster, f *Font, x, y int, text string, paint color.RGBA, 
 		raster.version++
 	}
 	return dot.X.Ceil() - origin
+}
+
+// measureText is drawText without the drawing: the same kerning rule and the
+// same space-width gap for a rune the font has nothing for. One walk for both
+// is what keeps a label centred by measuring where drawing then puts it.
+func measureText(f *Font, text string) fixed.Int26_6 {
+	var width fixed.Int26_6
+	var previous rune
+	for index, current := range text {
+		if index > 0 && f.kerning {
+			width += f.face.Kern(previous, current)
+		}
+		advance, ok := f.face.GlyphAdvance(current)
+		if !ok {
+			advance = spaceAdvance(f)
+		}
+		width += advance
+		previous = current
+	}
+	return width
 }
 
 // blitThreshold writes the glyph as solid pixels wherever the mask covers at
