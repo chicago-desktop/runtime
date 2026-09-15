@@ -406,3 +406,105 @@ func TestGitDependency_UpdateFollowsMovedTag(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, first[0].Commit, pinned[0].Commit)
 }
+
+// writeReplacementTree writes a module tree standing in for a repository:
+// its own version, and the repository it stands in for when named.
+func writeReplacementTree(t *testing.T, dir, name, version, repository string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
+	parts := strings.SplitN(name, "/", 2)
+	manifest := "organization: " + parts[0] + "\nmodule: " + parts[1] + "\nversion: " + version + "\n"
+	if repository != "" {
+		manifest += "repository: " + repository + "\n"
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "wippy.yaml"), []byte(manifest), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "_index.json"), []byte(gittest.Index("acme.widget")), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "note.txt"), []byte("from the working copy\n"), 0o600))
+}
+
+func (w *gitWorkspace) handlerWithReplacements(t *testing.T, refresh bool, replacements ...lock.Replacement) *DependencyHandler {
+	t.Helper()
+	handler, err := NewDependencyHandler(DependencyHandlerOptions{
+		Hub:                   w.hub,
+		Logger:                zap.NewNop(),
+		LockPath:              w.lockPath,
+		GitCache:              w.cache,
+		RefreshGitSources:     refresh,
+		WorkspaceReplacements: replacements,
+	})
+	require.NoError(t, err)
+	return handler
+}
+
+// TestGitDependency_ReplacedGitDeclaredModule is the shell's setup: the
+// declaration names the repository, a workspace replacement supplies the
+// directory. update records the tag's evidence in the row; the boot binds
+// the declaration from it offline and loads the directory.
+func TestGitDependency_ReplacedGitDeclaredModule(t *testing.T) {
+	repo := widgetRepo(t)
+	w := newGitWorkspace(t)
+	replacement := filepath.Join(t.TempDir(), "widget-copy")
+	writeReplacementTree(t, replacement, "acme/widget", "0.1.9", "")
+	replaced := lock.Replacement{From: "acme/widget", To: replacement}
+	roots := []DependencyDefinition{{Component: repo.Source(""), Version: "^0.1.0"}}
+
+	// wippy update: the directory's version, the tag's evidence.
+	resolved, err := w.handlerWithReplacements(t, true, replaced).ResolveWorkspaceDependencies(newTestContext(), roots)
+	require.NoError(t, err)
+	require.Len(t, resolved, 1)
+	mod := resolved[0]
+	assert.Equal(t, "0.1.9", mod.Version, "the version the directory declares, not a tag")
+	assert.NotEqual(t, moduleSourceGit, mod.Source, "the module's identity stays the directory's")
+	assert.Equal(t, repo.Source(""), mod.Repository)
+	assert.Equal(t, repo.Commits["v0.1.3"], mod.Commit, "the tag the declaration's range selected")
+	tagDigest, _, err := digestReplacementTree(gitsource.New(w.cache).CheckoutDir(mustParse(t, repo.Source("")), mod.Commit))
+	require.NoError(t, err)
+	assert.Equal(t, tagDigest, mod.Digest, "the tag's tree digest, not the directory's")
+
+	lockObj, err := lock.New(w.lockPath)
+	require.NoError(t, err)
+	lockObj.ReplaceModules([]lock.Module{{Name: "acme/widget", Version: mod.Version, Source: mod.Repository, Commit: mod.Commit, LocalHash: mod.Digest}})
+	require.NoError(t, lockObj.Write())
+
+	// The boot: no git on PATH, the declaration binds from the row, the
+	// module loads from the directory.
+	t.Setenv("PATH", t.TempDir())
+	handler := w.handlerWithReplacements(t, false, replaced)
+	booted, err := handler.resolveEffectiveModules(offlineContext(), roots, map[string]string{"acme/widget": "0.1.9"}, nil)
+	require.NoError(t, err)
+	require.Len(t, booted, 1)
+	assert.Equal(t, moduleSourceReplacementTreeV1, booted[0].Source)
+	assert.Equal(t, "0.1.9", booted[0].Version)
+	path, err := handler.ensureModuleAvailable(offlineContext(), booted[0])
+	require.NoError(t, err)
+	assert.Equal(t, replacement, path)
+	assert.Zero(t, w.hubCalls)
+}
+
+// TestGitDependency_ReplacementManifestNamesTheRepository: with no row in
+// the lock, a directory whose wippy.yaml names the repository binds the
+// declaration by itself.
+func TestGitDependency_ReplacementManifestNamesTheRepository(t *testing.T) {
+	repo := widgetRepo(t)
+	w := newGitWorkspace(t)
+	replacement := filepath.Join(t.TempDir(), "widget-copy")
+	writeReplacementTree(t, replacement, "acme/widget", "0.1.9", "git+"+repo.Bare)
+	replaced := lock.Replacement{From: "acme/widget", To: replacement}
+	roots := []DependencyDefinition{{Component: repo.Source(""), Version: "^0.1.0"}}
+
+	t.Setenv("PATH", t.TempDir())
+	handler := w.handlerWithReplacements(t, false, replaced)
+	booted, err := handler.resolveEffectiveModules(offlineContext(), roots, map[string]string{"acme/widget": "0.1.9"}, nil)
+	require.NoError(t, err)
+	require.Len(t, booted, 1)
+	assert.Equal(t, moduleSourceReplacementTreeV1, booted[0].Source)
+	path, err := handler.ensureModuleAvailable(offlineContext(), booted[0])
+	require.NoError(t, err)
+	assert.Equal(t, replacement, path)
+
+	// A directory that names no repository cannot bind the declaration.
+	writeReplacementTree(t, replacement, "acme/widget", "0.1.9", "")
+	_, err = w.handlerWithReplacements(t, false, replaced).resolveEffectiveModules(offlineContext(), roots, map[string]string{"acme/widget": "0.1.9"}, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "offline")
+}

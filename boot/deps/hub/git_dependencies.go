@@ -27,11 +27,12 @@ const moduleSourceGit = "git"
 // names the repository; the resolver, the lock and every other module name
 // the module, so the binding is made once per repository and reused.
 type gitBinding struct {
-	source  gitsource.Source
-	name    string            // organization/module from the manifest
-	commits map[string]string // version -> commit
-	tags    map[string]string // version -> tag name, when the tags were listed
-	listed  bool
+	source   gitsource.Source
+	name     string            // organization/module from the manifest
+	selected string            // the version the declaration's constraint selected, when tags were listed
+	commits  map[string]string // version -> commit
+	tags     map[string]string // version -> tag name, when the tags were listed
+	listed   bool
 }
 
 // gitState is the handler's view of git sources: the cache, the bindings by
@@ -261,11 +262,12 @@ func (h *DependencyHandler) bindGitSource(ctx context.Context, component, constr
 		return nil, NewDependencyResolutionError(err)
 	}
 	binding := &gitBinding{
-		source:  src,
-		name:    name,
-		commits: make(map[string]string, len(versions)),
-		tags:    make(map[string]string, len(versions)),
-		listed:  true,
+		source:   src,
+		name:     name,
+		selected: version,
+		commits:  make(map[string]string, len(versions)),
+		tags:     make(map[string]string, len(versions)),
+		listed:   true,
 	}
 	for v, tag := range versions {
 		binding.commits[v] = tag.Commit
@@ -306,6 +308,30 @@ func (h *DependencyHandler) recordedGitBinding(ctx context.Context, src gitsourc
 			name:    record.Name,
 			commits: map[string]string{record.Version: record.Commit},
 		}
+	}
+	// A directory replacement stands in for the repository when its own
+	// wippy.yaml names that repository: the directory is then the module the
+	// declaration asked for, and no tag has to be listed to learn its name.
+	for name, replacement := range h.replacements {
+		if replacement.IsGit() {
+			if pinned, err := gitsource.Parse(replacement.Source); err == nil && pinned.SameRepository(src) {
+				return &gitBinding{source: src, name: name, commits: map[string]string{}}
+			}
+			continue
+		}
+		path, ok := h.replacementPath(name)
+		if !ok {
+			continue
+		}
+		cfg, err := depconfig.Load(path)
+		if err != nil || strings.TrimSpace(cfg.Repository) == "" {
+			continue
+		}
+		declared, err := gitsource.Parse(cfg.Repository)
+		if err != nil || !declared.SameRepository(src) {
+			continue
+		}
+		return &gitBinding{source: src, name: name, commits: map[string]string{}}
 	}
 	return nil
 }
@@ -514,6 +540,9 @@ func (h *DependencyHandler) completeGitModuleIdentities(ctx context.Context, mod
 		mod := &modules[i]
 		name := mod.Org + "/" + mod.Name
 		if _, replaced := h.replacementPath(name); replaced {
+			if err := h.recordReplacedGitIdentity(ctx, mod); err != nil {
+				return err
+			}
 			continue
 		}
 		binding := h.gitBindingForModule(name)
@@ -543,6 +572,48 @@ func (h *DependencyHandler) completeGitModuleIdentities(ctx context.Context, mod
 			mod.SizeBytes = size
 		}
 	}
+	return nil
+}
+
+// recordReplacedGitIdentity gives a module that is declared by its git
+// source but taken through a directory replacement the evidence the lock
+// needs to bind the source offline: the repository, the commit of the tag
+// the declaration resolved to and that tag's tree digest. The module's own
+// identity stays the directory's; install and the boot never check the tag
+// out for it. A binding made from the lock (no tags listed) keeps what the
+// lock already records.
+func (h *DependencyHandler) recordReplacedGitIdentity(ctx context.Context, mod *ResolvedModule) error {
+	name := mod.Org + "/" + mod.Name
+	binding := h.gitBindingByName(name)
+	if binding == nil || binding.selected == "" {
+		if h.lock != nil {
+			if locked, ok := h.lock.GetModule(name); ok && locked.IsGit() && locked.Commit != "" {
+				mod.Repository, mod.Commit = locked.Source, locked.Commit
+				if mod.Digest == "" {
+					mod.Digest = locked.LocalHash
+				}
+			}
+		}
+		return nil
+	}
+	commit, ok := binding.commits[binding.selected]
+	if !ok {
+		return nil
+	}
+	mod.Repository = binding.source.Raw
+	mod.Commit = commit
+	if mod.Digest != "" {
+		return nil
+	}
+	dir, err := h.gitCheckout(ctx, binding.source, commit, modKey(*mod))
+	if err != nil {
+		return err
+	}
+	digest, _, err := digestReplacementTree(dir)
+	if err != nil {
+		return NewDependencyIntegrityError(modKey(*mod), err, "", 0)
+	}
+	mod.Digest = digest
 	return nil
 }
 

@@ -14,14 +14,16 @@ import (
 )
 
 // lockModuleFromResolved renders a resolved module as its lock row: a Hub
-// module pins its artifact digest, a git module its repository, commit and
-// tree digest.
+// module pins its artifact digest; a module declared by a git repository
+// pins the repository, the commit and the tree digest - whether the tree
+// is the checkout (source git) or a directory replacement standing in for
+// it, whose row still has to bind the declaration offline.
 func lockModuleFromResolved(m hub.ResolvedModule) lock.Module {
 	row := lock.Module{
 		Name:    m.Org + "/" + m.Name,
 		Version: m.Version,
 	}
-	if m.Source == "git" {
+	if m.Repository != "" && m.Commit != "" {
 		row.Source = m.Repository
 		row.Commit = m.Commit
 		row.LocalHash = m.Digest
@@ -106,6 +108,11 @@ func ensureGitModules(ctx context.Context, lockObj *lock.Lock, logger *zap.Logge
 	count := 0
 	for _, module := range lockObj.GetModules() {
 		if !module.IsGit() {
+			continue
+		}
+		if repl, replaced := lockObj.GetReplacement(module.Name); replaced && !repl.IsGit() {
+			// Declared by its git source, taken from a directory: the row's
+			// source and commit bind the declaration, the directory is loaded.
 			continue
 		}
 		count++

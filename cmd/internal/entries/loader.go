@@ -191,16 +191,20 @@ func ensureModulesInstalledFromLockWithClient(
 	// Check which modules need installation
 	var missingModules []lock.Module
 	for _, mod := range modules {
+		if repl, ok := lockObj.GetReplacement(mod.Name); ok && !repl.IsGit() {
+			// A module replaced by a directory is loaded from it whatever its
+			// declaration names; a git row here is evidence for binding the
+			// declaration, not a checkout to materialize. A url#ref
+			// replacement is a checkout and is materialized below.
+			logger.Debug("module is replaced by local source; skipping auto-install",
+				zap.String("module", mod.Name),
+				zap.String("replacement", repl.To))
+			continue
+		}
 		if mod.IsGit() {
 			if err := EnsureGitModuleCheckout(ctx, lockObj, mod, logger); err != nil {
 				return err
 			}
-			continue
-		}
-		if repl, ok := lockObj.GetReplacement(mod.Name); ok {
-			logger.Debug("module is replaced by local source; skipping auto-install",
-				zap.String("module", mod.Name),
-				zap.String("replacement", repl.To))
 			continue
 		}
 

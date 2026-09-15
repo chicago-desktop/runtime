@@ -117,11 +117,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	// Git modules come from the cache at the commit the lock records; a
 	// commit already checked out needs no network, and every checkout is
 	// verified against local_hash before anything loads it.
-	if selection.skippedGit > 0 {
-		checkedOut, err := ensureGitModules(app.Ctx, lockObj, logger)
-		if err != nil {
-			return err
-		}
+	checkedOut, err := ensureGitModules(app.Ctx, lockObj, logger)
+	if err != nil {
+		return err
+	}
+	if checkedOut > 0 {
 		logger.Info("git modules verified from cache", zap.Int("count", checkedOut))
 	}
 	if len(modules) == 0 {
@@ -484,19 +484,19 @@ func selectInstallModules(lockObj *lock.Lock, requested []string, logger *zap.Lo
 		}
 		selection.matched++
 
+		if repl, ok := lockObj.GetReplacement(module.Name); ok {
+			logger.Info("module is replaced by local source; skipping install",
+				zap.String("module", module.Name),
+				zap.String("replacement", repl.To))
+			selection.skippedReplaced++
+			continue
+		}
 		if module.IsGit() {
 			logger.Info("module comes from a git repository; taken from the cache",
 				zap.String("module", module.Name),
 				zap.String("source", module.Source),
 				zap.String("commit", module.Commit))
 			selection.skippedGit++
-			continue
-		}
-		if repl, ok := lockObj.GetReplacement(module.Name); ok {
-			logger.Info("module is replaced by local source; skipping install",
-				zap.String("module", module.Name),
-				zap.String("replacement", repl.To))
-			selection.skippedReplaced++
 			continue
 		}
 

@@ -113,13 +113,26 @@ func prepareRunDependencies(
 		modules = append(modules, lockModuleFromResolved(module))
 	}
 	// Retain selected replacement rows from legacy resolutions that did not
-	// return them while repairing unrelated dependencies.
+	// return them while repairing unrelated dependencies, and the git
+	// evidence (source, commit, tag digest) a replaced module's row carries
+	// for its declaration, which only wippy update rewrites.
 	for _, module := range lockObj.GetModules() {
-		if _, ok := selected[module.Name]; ok {
+		_, replaced := lockObj.GetReplacement(module.Name)
+		if !replaced {
 			continue
 		}
-		if _, replaced := lockObj.GetReplacement(module.Name); replaced {
+		if _, ok := selected[module.Name]; !ok {
 			modules = append(modules, module)
+			continue
+		}
+		if !module.IsGit() {
+			continue
+		}
+		for i := range modules {
+			if modules[i].Name == module.Name && (modules[i].Commit == "" || modules[i].LocalHash == "") {
+				modules[i].Hash = ""
+				modules[i].Source, modules[i].Commit, modules[i].LocalHash = module.Source, module.Commit, module.LocalHash
+			}
 		}
 	}
 	lockObj.ReplaceModules(modules)

@@ -48,7 +48,14 @@ A dependency may name a git repository instead of a Hub module:
 - **Replacements** stay what they are — a directory overrides a name for
   development — and gain one form: `chicago/shell: https://github.com/…#ref`
   pins a branch or a commit instead of a tag (the ref is resolved on
-  `update` and recorded as a commit).
+  `update` and recorded as a commit). A module declared by its git source
+  and replaced by a directory is loaded from the directory; `update` still
+  records the source, the commit and the tree digest of the tag the
+  declaration resolved to in its lock row, so the boot binds the
+  declaration to the module offline without listing tags, and a directory
+  whose `wippy.yaml` names the repository (`repository:`) binds even
+  without that row. Install and the boot never check the tag out for a
+  replaced module.
 - **Resolution and the lock.** `wippy update` lists the tags
   (`git ls-remote --tags`), picks the version, resolves it to a commit and
   writes the lock; `wippy install` and the boot use the commit from the
@@ -96,5 +103,8 @@ directory with a few tags — no network: parsing every form of
 no match; a tag with and without the `v`; a transitive git dependency; a
 module-name conflict between two sources; the second install offline; the
 changed-tree refusal; the lock round trip; a missing `git` binary; a
-replacement with `#ref`. The CI's golangci-lint must stay clean
+replacement with `#ref`; a git-declared module under a directory
+replacement: `update` writes the full row, the boot loads the directory
+offline, and the shell's harness shape (a root and a `test/` workspace,
+each with its own `.wippy.yaml` and lock) does the same. The CI's golangci-lint must stay clean
 (fieldalignment, noctx, misspell).

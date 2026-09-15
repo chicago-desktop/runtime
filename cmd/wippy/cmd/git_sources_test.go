@@ -16,6 +16,7 @@ import (
 	"github.com/wippyai/runtime/boot/deps/gitsource/gittest"
 	"github.com/wippyai/runtime/boot/deps/hub"
 	"github.com/wippyai/runtime/boot/deps/lock"
+	entryloader "github.com/wippyai/runtime/cmd/internal/entries"
 	syspayload "github.com/wippyai/runtime/system/payload"
 	jsonpayload "github.com/wippyai/runtime/system/payload/json"
 	"go.uber.org/zap"
@@ -137,4 +138,109 @@ func TestResolveGitReplacements_RefusesSourceWithoutRef(t *testing.T) {
 	err = resolveGitReplacements(context.Background(), lockObj, zap.NewNop())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "names no ref")
+}
+
+// TestGitDeclaredModuleUnderReplacement_HarnessShape is the shell's harness:
+// a root workspace and a test/ workspace, each with its own .wippy.yaml that
+// replaces the git-declared base with the neighboring working copy. update
+// in both writes the full row; the boot of either loads the directory with
+// no git on PATH.
+func TestGitDeclaredModuleUnderReplacement_HarnessShape(t *testing.T) {
+	ctx := setupLoaderContext(t)
+	base := gittest.New(t, "acme", "base")
+	base.Commit(t, "0.2.0", map[string]string{"src/_index.yaml": "namespace: acme.base\nentries: []\n", "src/note.txt": "tagged\n"})
+	base.Tag(t, "v0.2.0", false)
+	base.Push(t)
+
+	root := t.TempDir()
+	cache := filepath.Join(root, "git-cache")
+	workingCopy := filepath.Join(root, "base-copy")
+	require.NoError(t, os.MkdirAll(filepath.Join(workingCopy, "src"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workingCopy, "wippy.yaml"), []byte("organization: acme\nmodule: base\nversion: 0.2.0\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(workingCopy, "src", "_index.yaml"), []byte("namespace: acme.base\nentries: []\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(workingCopy, "src", "note.txt"), []byte("working copy\n"), 0o600))
+
+	shell := filepath.Join(root, "shell")
+	workspaces := []struct {
+		dir         string
+		replacement string
+	}{
+		{dir: shell, replacement: "../base-copy"},
+		{dir: filepath.Join(shell, "test"), replacement: "../../base-copy"},
+	}
+	roots := []dependencyRequest{{Component: base.Source(""), Constraint: ">=0.2.0"}}
+	provider := runManifestProvider{manifests: map[string]hub.ModuleManifest{}}
+
+	for _, ws := range workspaces {
+		require.NoError(t, os.MkdirAll(ws.dir, 0o755))
+		cfg := bootapi.NewConfig(
+			bootapi.WithSection("boot", map[string]any{"config_dir": ws.dir}),
+			bootapi.WithSection("workspace", map[string]any{"replacements.acme/base": ws.replacement}),
+		)
+		lockPath := filepath.Join(ws.dir, lock.DefaultFilename)
+
+		// make setup: wippy update in the workspace.
+		workLock, err := lock.New(lockPath, lock.WithGitCache(cache), lock.WithWorkspaceConfig(cfg))
+		require.NoError(t, err)
+		resolved, err := resolveUpdatedWorkspaceDependencies(ctx, provider, workLock, lockPath, cfg, roots, nil)
+		require.NoError(t, err)
+		newLock, err := convertResolvedToLock(lockPath, resolved, ".wippy", "./src")
+		require.NoError(t, err)
+		require.NoError(t, newLock.Write())
+
+		row, ok := newLock.GetModule("acme/base")
+		require.True(t, ok, ws.dir)
+		assert.Equal(t, "0.2.0", row.Version)
+		assert.Equal(t, base.Source(""), row.Source, "the declaration's repository")
+		assert.Equal(t, base.Commits["v0.2.0"], row.Commit, "the tag the range selected")
+		assert.Contains(t, row.LocalHash, "sha256-tree-v1:")
+		assert.Empty(t, row.Hash)
+	}
+
+	// make test: the workspace boots with no git on PATH, no cache at all,
+	// and loads the copy; update's checkout of the tag is not needed.
+	t.Setenv("PATH", t.TempDir())
+	require.NoError(t, os.RemoveAll(cache))
+	for _, ws := range workspaces {
+		cfg := bootapi.NewConfig(
+			bootapi.WithSection("boot", map[string]any{"config_dir": ws.dir}),
+			bootapi.WithSection("workspace", map[string]any{"replacements.acme/base": ws.replacement}),
+		)
+		lockObj, err := lock.New(filepath.Join(ws.dir, lock.DefaultFilename), lock.WithGitCache(cache), lock.WithWorkspaceConfig(cfg))
+		require.NoError(t, err)
+		require.NoError(t, lock.Validate(lockObj))
+		require.NoError(t, entryloader.EnsureModulesInstalledFromLock(ctx, lockObj, zap.NewNop(), nil), "a replaced module needs no checkout")
+		require.Zero(t, mustCount(t, lockObj), "no checkout was materialized for a replaced module")
+
+		paths := lockObj.GetModuleLoadPaths()
+		require.Len(t, paths, 2)
+		assert.Equal(t, "acme/base", paths[1].Module)
+		assert.True(t, paths[1].Replacement)
+		assert.Equal(t, filepath.Clean(filepath.Join(ws.dir, ws.replacement)), paths[1].SourceRoot)
+
+		// The boot's own resolution from the same lock, offline.
+		offline := regapi.WithDependencyAccess(ctx, regapi.DependencyAccessVerifiedOffline)
+		handler, err := hub.NewDependencyHandler(hub.DependencyHandlerOptions{
+			Hub: provider, LockPath: lockObj.Path(), GitCache: cache, WorkspaceReplacements: lockObj.GetReplacements(),
+		})
+		require.NoError(t, err)
+		modules, err := handler.ResolveWorkspaceDependencies(offline, []hub.DependencyDefinition{{Component: base.Source(""), Version: ">=0.2.0"}})
+		require.NoError(t, err)
+		require.Len(t, modules, 1)
+		assert.Equal(t, "acme/base", modules[0].Org+"/"+modules[0].Name)
+	}
+}
+
+// mustCount counts the checkouts materialized for the lock's git rows.
+func mustCount(t *testing.T, lockObj *lock.Lock) int {
+	t.Helper()
+	count := 0
+	for _, module := range lockObj.GetModules() {
+		if dir, ok := lockObj.GitCheckoutDir(module); ok {
+			if _, err := os.Stat(dir); err == nil {
+				count++
+			}
+		}
+	}
+	return count
 }
