@@ -429,7 +429,9 @@ func TestSSHHostKeyIsKept(t *testing.T) {
 		"clients must see the same host from one start to the next")
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	if runtime.GOOS != "windows" { // Windows has no POSIX modes: Stat reports 0666 whatever was asked
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	}
 }
 
 func TestSSHAuthorizedKeysSkipRestrictedKeys(t *testing.T) {
