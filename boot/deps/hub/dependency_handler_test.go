@@ -20,6 +20,7 @@ import (
 	"github.com/wippyai/runtime/api/attrs"
 	ctxapi "github.com/wippyai/runtime/api/context"
 	apierror "github.com/wippyai/runtime/api/error"
+	"github.com/wippyai/runtime/api/logs"
 	"github.com/wippyai/runtime/api/payload"
 	regapi "github.com/wippyai/runtime/api/registry"
 	"github.com/wippyai/runtime/boot/deps/lock"
@@ -28,6 +29,7 @@ import (
 	yamlpayload "github.com/wippyai/runtime/system/payload/yaml"
 	"github.com/wippyai/wapp"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type fakeHub struct {
@@ -3046,6 +3048,88 @@ func TestDependencyHandler_Expand_PreservesLockLoadedModuleEntries(t *testing.T)
 	assert.True(t, createdModuleEntry, "new dependency module entry should still be created")
 }
 
+func TestDependencyHandler_Expand_RetainsUnchangedModuleBindings(t *testing.T) {
+	observed, messages := observer.New(zap.WarnLevel)
+	ctx := logs.WithLogger(newTestContext(), zap.New(observed))
+	tmpDir := t.TempDir()
+	vendorDir := filepath.Join(tmpDir, "vendor")
+
+	writeWapp(t, filepath.Join(vendorDir, "acme", "http-v1.0.0.wapp"), []wapp.Entry{
+		{
+			ID:   wapp.NewID("acme.http", "svc"),
+			Kind: "service",
+			Data: map[string]any{"ok": true},
+		},
+	})
+
+	handler, err := NewDependencyHandler(DependencyHandlerOptions{
+		Hub: &fakeHub{
+			getManifest: func(_ context.Context, org, module, version string) (*ModuleManifest, error) {
+				return &ModuleManifest{
+					Org:     org,
+					Name:    module,
+					Version: version,
+				}, nil
+			},
+		},
+		Logger:    zap.NewNop(),
+		VendorDir: vendorDir,
+	})
+	require.NoError(t, err)
+
+	lockLoadedID := regapi.NewID("keeper.hub.tools", "dependencies")
+	snapshot := regapi.State{
+		{ID: regapi.NewID("keeper", "namespace"), Kind: regapi.NamespaceDefinition,
+			Registry: regapi.EntryMetadata{Owner: "keeper/keeper"}},
+
+		{
+			ID:       regapi.NewID("installed", "dependency"),
+			Kind:     regapi.NamespaceDependency,
+			Registry: regapi.EntryMetadata{Owner: "installed/app"},
+			Data:     payload.NewPayload(`{"component":"keeper/keeper","parameters":[{"name":"keeper:admin_scope","value":"app.security:admin"}]}`, payload.JSON),
+		},
+		{
+			ID:       regapi.NewID("keeper", "admin_scope"),
+			Kind:     regapi.NamespaceRequirement,
+			Registry: regapi.EntryMetadata{Owner: "keeper/keeper"},
+			Data:     payload.NewPayload(`{"targets":[{"entry":"keeper:config","path":".default"}]}`, payload.JSON),
+		},
+		{
+			ID:       regapi.NewID("keeper", "config"),
+			Kind:     "registry.entry",
+			Registry: regapi.EntryMetadata{Owner: "keeper/keeper"},
+			Data:     payload.NewPayload(`{"default":"app.security:admin"}`, payload.JSON),
+		},
+		{
+			ID:       lockLoadedID,
+			Kind:     "function.lua",
+			Registry: regapi.EntryMetadata{Owner: "keeper/keeper"},
+			Data:     payload.New("return {}"),
+		},
+	}
+
+	depEntry := regapi.Entry{
+		ID:   regapi.NewID("app.deps", "http"),
+		Kind: regapi.NamespaceDependency,
+		Data: payload.NewPayload(`{"component":"acme/http","version":"v1.0.0"}`, payload.JSON),
+	}
+
+	result, err := handler.Expand(ctx, regapi.Operation{Kind: regapi.EntryCreate, Entry: depEntry}, snapshot)
+	require.NoError(t, err)
+	assert.True(t, result.Applied)
+	assert.Empty(t, messages.FilterMessage("unresolved requirement").All())
+
+	createdModuleEntry := false
+	for _, scoped := range result.Additional {
+		op := scoped.Operation
+		require.NotEqual(t, lockLoadedID, op.Entry.ID, "lock-loaded Keeper entry must not be touched")
+		if op.Kind == regapi.EntryCreate && op.Entry.ID == regapi.NewID("acme.http", "svc") {
+			createdModuleEntry = true
+		}
+	}
+	assert.True(t, createdModuleEntry, "new dependency module entry should still be created")
+}
+
 func TestDependencyHandler_Expand_UsesLockReplacementForExistingRootDependency(t *testing.T) {
 	ctx := newTestContext()
 	tmpDir := t.TempDir()
@@ -3209,4 +3293,20 @@ func completeArtifactFixture(entries []wapp.Entry) []wapp.Entry {
 		Kind: regapi.NamespaceDefinition,
 	})
 	return completed
+}
+
+func TestMergeLinkDependencies_DoesNotRestoreRemovedRootBindings(t *testing.T) {
+	dep := func(name, owner string, root bool) regapi.Entry {
+		return regapi.Entry{ID: regapi.NewID("deps", name), Kind: regapi.NamespaceDependency,
+			Registry: regapi.EntryMetadata{Owner: owner, Root: root}}
+	}
+	desired := dep("desired", "deployment/app", true)
+	retained := dep("retained", "installed/app", false)
+	combined := []regapi.Entry{
+		dep("deleted", "deployment/app", true),
+		dep("overlay_deleted", "", false),
+		desired, retained,
+		{ID: regapi.NewID("app", "config"), Kind: "registry.entry"},
+	}
+	assert.Equal(t, []regapi.Entry{desired, retained}, mergeLinkDependencies([]regapi.Entry{desired}, combined))
 }

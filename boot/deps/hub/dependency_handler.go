@@ -462,7 +462,6 @@ func (h *DependencyHandler) expand(
 		return regapi.DirectiveResult{}, err
 	}
 	defer func() { _ = unpackPlan.cleanup() }()
-	linkDeps := mergeLinkDependencies(desiredDepEntries, moduleEntries)
 
 	combined := make([]regapi.Entry, 0, len(snapshot)+len(moduleEntries))
 	for _, e := range snapshot {
@@ -483,7 +482,7 @@ func (h *DependencyHandler) expand(
 	pipeline := build.New(
 		stages.Override(stages.WithMissingOverrideEntriesIgnored()),
 		stages.Disable(),
-		stages.Link(stages.WithDependencies(linkDeps), stages.WithStrictRequirementModules(strictModules)),
+		stages.Link(stages.WithDependencies(mergeLinkDependencies(desiredDepEntries, combined)), stages.WithStrictRequirementModules(strictModules)),
 		stages.Override(stages.WithMissingOverrideEntriesIgnored()),
 	)
 	if err := pipeline.Execute(ctx, &combined); err != nil {
@@ -894,7 +893,7 @@ func (h *DependencyHandler) ReconcileResolution(
 	pipeline := build.New(
 		stages.Override(stages.WithMissingOverrideEntriesIgnored()),
 		stages.Disable(),
-		stages.Link(stages.WithDependencies(mergeLinkDependencies(desiredDepEntries, moduleEntries)), stages.WithStrictRequirementModules(sortedSetKeys(touched))),
+		stages.Link(stages.WithDependencies(mergeLinkDependencies(desiredDepEntries, combined)), stages.WithStrictRequirementModules(sortedSetKeys(touched))),
 		stages.Override(stages.WithMissingOverrideEntriesIgnored()),
 	)
 	if err := pipeline.Execute(ctx, &combined); err != nil {
@@ -1404,9 +1403,9 @@ func (h *DependencyHandler) installedModuleVersions(ctx context.Context, transco
 	return versions, nil
 }
 
-func mergeLinkDependencies(explicitDeps, moduleEntries []regapi.Entry) []regapi.Entry {
-	merged := make([]regapi.Entry, 0, len(explicitDeps)+len(moduleEntries))
-	seen := make(map[string]struct{}, len(explicitDeps)+len(moduleEntries))
+func mergeLinkDependencies(explicitDeps, combined []regapi.Entry) []regapi.Entry {
+	merged := make([]regapi.Entry, 0, len(explicitDeps)+len(combined))
+	seen := make(map[string]struct{}, len(explicitDeps)+len(combined))
 
 	appendDep := func(entry regapi.Entry) {
 		if entry.Kind != regapi.NamespaceDependency {
@@ -1423,8 +1422,14 @@ func mergeLinkDependencies(explicitDeps, moduleEntries []regapi.Entry) []regapi.
 	for _, entry := range explicitDeps {
 		appendDep(entry)
 	}
-	for _, entry := range moduleEntries {
-		appendDep(entry)
+	// The link stage visits the whole resulting state, including unchanged
+	// modules. Their authored bindings must remain available too. Root
+	// declarations come exclusively from explicitDeps so removed or updated
+	// roots in the snapshot cannot resurrect stale parameter values.
+	for _, entry := range combined {
+		if !isRootDependency(entry) {
+			appendDep(entry)
+		}
 	}
 
 	return merged
