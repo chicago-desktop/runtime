@@ -5,7 +5,7 @@ package hub
 import (
 	"context"
 	"fmt"
-	"os"
+	"io"
 	"sync"
 
 	lua "github.com/wippyai/go-lua"
@@ -35,7 +35,7 @@ func init() {
 // file must stay open because the resource filesystem reads lazily from the
 // reader. Cleanup is registered on the resource store and cancelled on close.
 type packageHandle struct {
-	file          *os.File
+	file          io.Closer
 	reader        *wapp.Reader
 	cancelCleanup func()
 	version       string
@@ -45,7 +45,7 @@ type packageHandle struct {
 	packed        bool
 }
 
-func newPackageHandle(ctx context.Context, file *os.File, reader *wapp.Reader, version, digest string) *packageHandle {
+func newPackageHandle(ctx context.Context, file io.Closer, reader *wapp.Reader, version, digest string) *packageHandle {
 	h := &packageHandle{
 		version: version,
 		digest:  digest,

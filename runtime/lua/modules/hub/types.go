@@ -133,6 +133,7 @@ func ModuleTypes() *io.Manifest {
 	})
 
 	moduleType := typ.NewRecord().
+		Field("open", typ.Func().Param("fs", typ.Any).Param("path", typ.String).Returns(packageType, typ.NewOptional(typ.LuaError)).Build()).
 		Field("modules", modulesIface).
 		Field("versions", versionsIface).
 		Field("dependencies", dependenciesIface).

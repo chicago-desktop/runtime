@@ -11,6 +11,14 @@ All requests support per-call options for registry, token, and timeout.
 
 ## API
 
+### `hub.open(fs, path)`
+Open a local `.wapp` through an authorized `fs.FS` handle. Requires `hub.open` on the resolved path within that FS.
+Returns the same owned package handle as `hub.versions.open`, without network,
+cache writes, registration or installation. Local handles have empty `version`
+and `digest` fields; inspect their metadata for author-provided version labels.
+Closing the handle releases its file; keep it alive while using resource FS handles.
+
+
 ### `hub.modules.list(opts?)`
 List modules with filters.
 

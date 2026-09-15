@@ -84,6 +84,7 @@ func (h *hubModule) authStore() *bootauth.Store {
 
 func (h *hubModule) build() (*lua.LTable, []luaapi.YieldType) {
 	mod := lua.CreateTable(0, 7)
+	mod.RawSetString("open", lua.LGoFunc(openLocalPackage))
 
 	modules := lua.CreateTable(0, 4)
 	modules.RawSetString("list", lua.LGoFunc(h.modulesList))
