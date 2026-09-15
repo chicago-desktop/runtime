@@ -1,0 +1,198 @@
+# SPDX-License-Identifier: MPL-2.0
+#
+# Release builds of this fork (wippy-windows/runtime, branch wippy-projects).
+#
+# Upstream's release.yml cannot run here: it signs the binaries with a key
+# this fork does not have and registers the release on the Hub. This
+# workflow builds the same five targets with the same Makefile target and
+# attaches them, with SHA256SUMS, to a GitHub release created from the
+# wippy-projects branch — the desktop (wippy-windows/app) downloads the
+# runtime from there.
+#
+# How to release: create a GitHub release (UI or `gh release create <tag>
+# --target wippy-projects`) — publishing it triggers the build. A tag that is
+# not on wippy-projects is refused. `workflow_dispatch` rebuilds an existing
+# release by tag.
+
+name: Release (wippy-projects)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of an existing release to (re)build, e.g. v0.3.42a-windows.1'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-wippy-projects-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_BRANCH: wippy-projects
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      short_sha: ${{ steps.v.outputs.short_sha }}
+      build_date: ${{ steps.v.outputs.build_date }}
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: The tag must be on the release branch
+        id: v
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$RELEASE_BRANCH"
+          if ! git merge-base --is-ancestor HEAD "origin/$RELEASE_BRANCH"; then
+            echo "tag $TAG ($(git rev-parse --short HEAD)) is not on $RELEASE_BRANCH; releases are built from that branch only" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$TAG"
+            echo "short_sha=$(git rev-parse --short=7 HEAD)"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: validate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm }
+          - { goos: darwin, goarch: amd64, runner: macos-26-intel }
+          - { goos: darwin, goarch: arm64, runner: macos-26 }
+          - { goos: windows, goarch: amd64, runner: windows-latest }
+    steps:
+      - name: Check out the release tag
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.tag }}
+
+      - name: Setup msys (Windows)
+        if: matrix.goos == 'windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-toolchain mingw-w64-x86_64-sqlite3
+          path-type: inherit
+
+      - name: SQLite headers (Linux)
+        if: matrix.goos == 'linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libsqlite3-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.27.0'
+          cache: true
+        env:
+          MSYSTEM: MINGW64
+
+      - name: Build
+        if: matrix.goos != 'windows'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.tag }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          BUILD_DATE: ${{ needs.validate.outputs.build_date }}
+        run: make build-wippy-local WIPPY_VERSION="$VERSION" WIPPY_COMMIT="$SHORT_SHA" WIPPY_DATE="$BUILD_DATE" WIPPY_BUILDER=github-actions
+
+      - name: Build (Windows)
+        if: matrix.goos == 'windows'
+        shell: 'msys2 {0}'
+        env:
+          VERSION: ${{ needs.validate.outputs.tag }}
+          SHORT_SHA: ${{ needs.validate.outputs.short_sha }}
+          BUILD_DATE: ${{ needs.validate.outputs.build_date }}
+        run: |
+          set -euo pipefail
+          make build-wippy-local WIPPY_VERSION="$VERSION" WIPPY_COMMIT="$SHORT_SHA" WIPPY_DATE="$BUILD_DATE" WIPPY_BUILDER=github-actions
+          mv dist/wippy-windows-amd64 dist/wippy-windows-amd64.exe
+
+      - name: Smoke check
+        if: matrix.goos != 'windows'
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bin="dist/wippy-${{ matrix.goos }}-${{ matrix.goarch }}"
+          "./$bin" --help >/dev/null
+          grep -a -- "$VERSION" "$bin" >/dev/null || { echo "version $VERSION not embedded in $bin"; exit 1; }
+
+      - name: Smoke check (Windows)
+        if: matrix.goos == 'windows'
+        shell: 'msys2 {0}'
+        env:
+          VERSION: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bin="dist/wippy-windows-amd64.exe"
+          "./$bin" --help >/dev/null
+          grep -a -- "$VERSION" "$bin" >/dev/null || { echo "version $VERSION not embedded in $bin"; exit 1; }
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: wippy-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/wippy-${{ matrix.goos }}-${{ matrix.goarch }}*
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Attach to the release
+    needs: [validate, build]
+    if: ${{ always() && needs.validate.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: wippy-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          sha256sum wippy-* > SHA256SUMS
+
+      - name: Attach the binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          missing=""
+          for want in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64 windows-amd64.exe; do
+            [ -e "dist/wippy-$want" ] || missing="$missing wippy-$want"
+          done
+          if [ -n "$missing" ]; then
+            echo "attached what was built; these targets failed to build:$missing" >&2
+            exit 1
+          fi
