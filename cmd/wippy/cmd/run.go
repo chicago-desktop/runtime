@@ -219,6 +219,12 @@ func runWithUseCase(cmd *cobra.Command, args []string, useCase string) error {
 		logger.Error("failed to initialize bootstrap context", zap.Error(err))
 		return NewInitializeBootstrapContextError(err)
 	}
+	ctx, loading, err := startLoadingScreen(ctx, cfg, silentLogs && useCase == defaultUseCase)
+	if err != nil {
+		return err
+	}
+	defer loading.Close()
+
 	registryClient := client.NewRegistryClientFromConfig(boot.GetConfig(ctx))
 	ctx = appinit.WithRegistryClient(ctx, registryClient)
 
@@ -271,6 +277,7 @@ func runWithUseCase(cmd *cobra.Command, args []string, useCase string) error {
 		return err
 	}
 
+	loading.Ready()
 	if !silentLogs {
 		logger.Info("runtime ready")
 	}
@@ -308,6 +315,7 @@ func runWithUseCase(cmd *cobra.Command, args []string, useCase string) error {
 		}
 	}
 
+	loading.Dismiss()
 	waitForShutdownSignal(sigChan, logger, nil)
 
 	exitCode := shutdown.Perform(ctx, loader, logger, silentLogs)

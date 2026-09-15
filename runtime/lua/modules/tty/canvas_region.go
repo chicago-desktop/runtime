@@ -9,7 +9,8 @@ import uv "github.com/charmbracelet/ultraviolet"
 // commands: control-only decoder output must never enter its rendered rows.
 type canvasRegion struct {
 	*canvasBuffer
-	area uv.Rectangle
+	area     uv.Rectangle
+	defaults uv.Style
 }
 
 func (r *canvasRegion) Bounds() uv.Rectangle { return r.area }
@@ -24,6 +25,16 @@ func (r *canvasRegion) CellAt(x, y int) *uv.Cell {
 func (r *canvasRegion) SetCell(x, y int, cell *uv.Cell) {
 	if !uv.Pos(x, y).In(r.area) || (cell != nil && cell.Width <= 0) {
 		return
+	}
+	if cell != nil && ((cell.Style.Fg == nil && r.defaults.Fg != nil) || (cell.Style.Bg == nil && r.defaults.Bg != nil)) {
+		copy := *cell
+		if copy.Style.Fg == nil {
+			copy.Style.Fg = r.defaults.Fg
+		}
+		if copy.Style.Bg == nil {
+			copy.Style.Bg = r.defaults.Bg
+		}
+		cell = &copy
 	}
 	if cell != nil && x+cell.Width > r.area.Max.X {
 		blank := *cell

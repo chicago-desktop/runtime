@@ -580,6 +580,7 @@ func runFromPackFile(cmd *cobra.Command, packFile string, args []string, useCase
 		return err
 	}
 	defer embedReg.Close()
+	defer loadingScreenFrom(ctx).Close()
 
 	mainModule, _, err := moduleIdentityFromPackFile(packFile)
 	if err != nil {
@@ -629,6 +630,7 @@ func runFromPackFiles(cmd *cobra.Command, packFiles []string, args []string, use
 		return err
 	}
 	defer embedReg.Close()
+	defer loadingScreenFrom(ctx).Close()
 
 	mainModule := ""
 	if len(packFiles) > 0 {
@@ -698,6 +700,7 @@ func runPackEntries(
 		return err
 	}
 
+	loadingScreenFrom(ctx).Ready()
 	if !silentLogs {
 		logger.Info("runtime ready")
 	}
@@ -728,6 +731,7 @@ func runPackEntries(
 		}
 	}
 
+	loadingScreenFrom(ctx).Dismiss()
 	waitForShutdownSignal(sigChan, logger, nil)
 
 	exitCode := shutdown.Perform(ctx, loader, logger, silentLogs)

@@ -39,6 +39,7 @@ const (
 	TreeSitterName   = "lua.treesitter"
 	QueueName        = "lua.queue"
 	TTYName          = "lua.tty"
+	GFXName          = "lua.gfx"
 	// UUIDName is a component name (UpstreamName reserved for future use)
 	UUIDName      = "lua.uuid"
 	WorkflowName  = "lua.workflow"

@@ -31,9 +31,20 @@ type PipeContext struct {
 	Stderr        io.Writer
 	activeSurface ttyapi.Surface
 	Surface       func(ttyapi.SurfaceOptions) (ttyapi.Surface, error)
-	Args          []string
-	surfaceMu     sync.Mutex
-	closed        bool
+	// Probe is what this terminal answered about itself. Nil means the
+	// terminal the process was started on (ttyapi.ProcessProbe).
+	Probe     *ttyapi.Probe
+	Args      []string
+	surfaceMu sync.Mutex
+	closed    bool
+}
+
+// TerminalProbe implements ttyapi.ProbeSource.
+func (pc *PipeContext) TerminalProbe() *ttyapi.Probe {
+	if pc == nil {
+		return nil
+	}
+	return pc.Probe
 }
 
 func (pc *PipeContext) InputController() ttyapi.InputController { return pc.Input }

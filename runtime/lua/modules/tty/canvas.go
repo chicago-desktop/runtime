@@ -4,6 +4,7 @@ package tty
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	uv "github.com/charmbracelet/ultraviolet"
@@ -128,8 +129,9 @@ func canvasPut(l *lua.LState) int {
 			return 0
 		}
 	}
+	defaults := canvasColors(l, 6)
 	if limit > 0 && y >= 0 && y < c.height {
-		c.put(x, y, text, limit)
+		c.put(x, y, text, limit, defaults)
 	}
 	l.Push(lua.LTrue)
 	return 1
@@ -161,15 +163,50 @@ func canvasPutRows(l *lua.LState) int {
 			return 0
 		}
 	}
+	defaults := canvasColors(l, 6)
 	for index := 1; index <= rowCount; index++ {
 		row := rows.RawGetInt(index)
 		rowY := y + index - 1
 		if rowY >= 0 && rowY < c.height {
-			c.put(x, rowY, string(row.(lua.LString)), limit)
+			c.put(x, rowY, string(row.(lua.LString)), limit, defaults)
 		}
 	}
 	l.Push(lua.LTrue)
 	return 1
+}
+
+// canvasColors is scoped to a single placement, never the physical terminal.
+func canvasColors(l *lua.LState, index int) uv.Style {
+	var defaults uv.Style
+	if l.Get(index) == lua.LNil {
+		return defaults
+	}
+	options := l.CheckTable(index)
+	for _, field := range []string{"foreground", "background"} {
+		value := options.RawGetString(field)
+		if value == lua.LNil {
+			continue
+		}
+		text, ok := value.(lua.LString)
+		if !ok {
+			l.ArgError(index, field+" must be a color string")
+			return defaults
+		}
+		paint := ansi.XParseColor(string(text))
+		if number, err := strconv.Atoi(string(text)); err == nil && number >= 0 && number <= 255 {
+			paint = ansi.IndexedColor(number)
+		}
+		if paint == nil {
+			l.ArgError(index, field+" must be a valid RGB color or palette index 0..255")
+			return defaults
+		}
+		if field == "foreground" {
+			defaults.Fg = paint
+		} else {
+			defaults.Bg = paint
+		}
+	}
+	return defaults
 }
 
 func canvasCoordinate(l *lua.LState, index int, name string) int {
@@ -181,7 +218,7 @@ func canvasCoordinate(l *lua.LState, index int, name string) int {
 	return coordinate
 }
 
-func (c *canvasWrapper) put(x, y int, text string, limit int) {
+func (c *canvasWrapper) put(x, y int, text string, limit int, defaults ...uv.Style) {
 	if x >= c.width {
 		return
 	}
@@ -203,6 +240,10 @@ func (c *canvasWrapper) put(x, y int, text string, limit int) {
 	// Canvas is owned by one Lua state. Reuse its drawing target rather than
 	// allocating a region for every row in an animated frame.
 	c.region.canvasBuffer, c.region.area = c.screen, uv.Rect(x, y, covered, 1)
+	c.region.defaults = uv.Style{}
+	if len(defaults) > 0 {
+		c.region.defaults = defaults[0]
+	}
 	uv.NewStyledString(clipped).Draw(&c.region, c.region.Bounds())
 }
 

@@ -4,6 +4,7 @@ package tty
 
 import (
 	"context"
+	"image"
 	"io"
 
 	ctxapi "github.com/wippyai/runtime/api/context"
@@ -21,6 +22,14 @@ type PresentStats struct {
 	Rows        int
 	ChangedRows int
 	Bytes       int
+
+	// Rasters actually sent this frame, out of however many the frame
+	// declared. It is the number a caller drawing an interface in pixels has
+	// to watch: a placement is transmitted whenever its pixels change OR a
+	// text row under it is repainted, so a chrome cut into the wrong pieces
+	// resends everything on every keystroke — silently, and only visible as
+	// the whole thing feeling slow.
+	PlacementsSent int
 }
 
 // Cursor is terminal cursor state in zero-based surface coordinates.
@@ -30,11 +39,39 @@ type Cursor struct {
 	Visible bool
 }
 
+// Placement is a raster occupying a rectangle of cells. Rows describe text;
+// a placement describes pixels that survive between frames on their own, so
+// the surface has to remember what it put on screen and take it away itself.
+//
+// Version changes when the pixels change. The surface retransmits only when
+// it does — a raster resent every frame is the difference between a still
+// picture and a flickering one, and the sender is the only one who can tell
+// cheaply whether anything moved.
+type Placement struct {
+	Image   image.Image
+	ID      string
+	Version uint64
+
+	// Identifies the buffer, as opposed to its contents. Two different
+	// pictures can carry the same version — a caller that rebuilds a raster
+	// every frame restarts the count — and without this the surface would
+	// take the second for the first and leave the stale one on screen.
+	Serial uint64
+	Row    int
+	Col    int
+	Cols   int
+	Rows   int
+}
+
 // Frame augments surface rows with optional terminal state. A nil Cursor lets
 // a renderer preserve its configured cursor behavior.
+//
+// Placements are declarative and complete: a placement missing from a frame
+// is removed from the screen. A caller that forgets one does not leak it.
 type Frame struct {
-	Cursor *Cursor
-	Rows   []string
+	Cursor     *Cursor
+	Rows       []string
+	Placements []Placement
 }
 
 type RawController interface {

@@ -36,6 +36,17 @@ func bootstrapPackRuntimeWithDefaults(cmd *cobra.Command, baseLogger *zap.Logger
 		return nil, nil, nil, nil, NewInitializeBootstrapContextError(err)
 	}
 
+	ctx, loading, err := startLoadingScreen(ctx, cfg, silentLogs && cmd != nil && cmd.Name() == "run")
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			loading.Close()
+		}
+	}()
+
 	logger := logapi.GetLogger(ctx).Named("run-pack")
 	logger.Info("infrastructure initialized")
 
@@ -68,5 +79,6 @@ func bootstrapPackRuntimeWithDefaults(cmd *cobra.Command, baseLogger *zap.Logger
 	}
 
 	logger.Info("components loaded successfully")
+	handedOff = true
 	return ctx, loader, logger, embedReg, nil
 }

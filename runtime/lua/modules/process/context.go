@@ -32,6 +32,19 @@ type Spawner struct {
 	hasActor bool
 	hasScope bool
 	hasOpts  bool
+
+	// Whether the CALLER asked for someone else's actor or scope, as opposed
+	// to carrying its own.
+	//
+	// hasActor and hasScope cannot answer that: they are set whenever an
+	// actor exists in context, which is always, and they have to stay that
+	// way because the same flags decide whether the child inherits one. Using
+	// them to gate the privilege made `with_options(...):with_context(...)`
+	// demand the right to impersonate — for a caller that had impersonated
+	// nobody. The two calls passed separately and refused together, which is
+	// why it survived the tests.
+	customActor bool
+	customScope bool
 }
 
 func init() {
@@ -56,15 +69,17 @@ func cloneSpawner(spawner *Spawner) *Spawner {
 	}
 
 	return &Spawner{
-		values:   spawner.values,
-		options:  spawner.options,
-		actor:    spawner.actor,
-		hasActor: spawner.hasActor,
-		scope:    spawner.scope,
-		hasScope: spawner.hasScope,
-		hasOpts:  spawner.hasOpts,
-		name:     spawner.name,
-		messages: spawner.messages,
+		values:      spawner.values,
+		options:     spawner.options,
+		actor:       spawner.actor,
+		hasActor:    spawner.hasActor,
+		scope:       spawner.scope,
+		hasScope:    spawner.hasScope,
+		hasOpts:     spawner.hasOpts,
+		name:        spawner.name,
+		messages:    spawner.messages,
+		customActor: spawner.customActor,
+		customScope: spawner.customScope,
 	}
 }
 
@@ -286,7 +301,7 @@ func spawnerWithContext(l *lua.LState) int {
 
 	ctxTable := l.CheckTable(2)
 
-	if (spawner.hasScope || spawner.hasActor) && !security.IsAllowed(ctx, "process.security", "security", secAttrs) {
+	if (spawner.customScope || spawner.customActor) && !security.IsAllowed(ctx, "process.security", "security", secAttrs) {
 		l.RaiseError("not allowed to spawn processes with custom security context")
 		return 0
 	}
@@ -305,15 +320,17 @@ func spawnerWithContext(l *lua.LState) int {
 	})
 
 	newSpawner := &Spawner{
-		values:   newValues,
-		options:  spawner.options,
-		actor:    spawner.actor,
-		hasActor: spawner.hasActor,
-		scope:    spawner.scope,
-		hasScope: spawner.hasScope,
-		hasOpts:  spawner.hasOpts,
-		name:     spawner.name,
-		messages: spawner.messages,
+		values:      newValues,
+		options:     spawner.options,
+		actor:       spawner.actor,
+		hasActor:    spawner.hasActor,
+		scope:       spawner.scope,
+		hasScope:    spawner.hasScope,
+		hasOpts:     spawner.hasOpts,
+		name:        spawner.name,
+		messages:    spawner.messages,
+		customActor: spawner.customActor,
+		customScope: spawner.customScope,
 	}
 
 	value.PushTypedUserData(l, newSpawner, spawnerTypeName)
@@ -398,6 +415,7 @@ func spawnerWithActor(l *lua.LState) int {
 	newSpawner := cloneSpawner(spawner)
 	newSpawner.actor = actor
 	newSpawner.hasActor = true
+	newSpawner.customActor = true
 
 	value.PushTypedUserData(l, newSpawner, spawnerTypeName)
 	return 1
@@ -442,6 +460,7 @@ func spawnerWithScope(l *lua.LState) int {
 	newSpawner := cloneSpawner(spawner)
 	newSpawner.scope = scope
 	newSpawner.hasScope = true
+	newSpawner.customScope = true
 
 	value.PushTypedUserData(l, newSpawner, spawnerTypeName)
 	return 1

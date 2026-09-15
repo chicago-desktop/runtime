@@ -29,6 +29,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// probeOnce guards the terminal capability query: one terminal, one
+// question, however many times a host is started and stopped.
+var probeOnce sync.Once
+
 // Host implements process.Host for terminal processes using actor scheduler.
 type Host struct {
 	factory      process.Factory
@@ -295,6 +299,14 @@ func (h *Host) Start(ctx context.Context) (<-chan any, error) {
 	h.doneClosed = false
 	statusCh := h.statusCh
 	h.lifecycleMu.Unlock()
+
+	// Ask the terminal what it can draw before anything is running. The
+	// answer arrives on the input path, and from the next line on that path
+	// belongs to a process; asking later would take bytes out of its hands.
+	// Once per process, not per host start: a restart happens with a program
+	// possibly still on screen, and the terminal has not changed its mind.
+	probeOnce.Do(func() { probeTerminal(os.Stdin, os.Stdout, h.raw) })
+
 	h.scheduler.Start()
 
 	h.log.Info("terminal host started", zap.String("id", h.id.String()))
@@ -358,6 +370,9 @@ func (h *Host) prepareContext(ctx context.Context, processID pid.PID, start *pro
 	tc.Raw = h.raw
 	tc.Input = NewInputReader(os.Stdin, tc.Stdout, h.raw, h.scheduler, processID)
 	tc.Surface = func(options ttyapi.SurfaceOptions) (ttyapi.Surface, error) {
+		if surface := SplashFromContext(h.ctx).TakeSurface(options); surface != nil {
+			return surface, nil
+		}
 		return NewSurface(os.Stdout, options), nil
 	}
 	pairs[3] = ctxapi.Pair{Key: terminalapi.Key(), Value: tc}

@@ -8,11 +8,17 @@ import (
 	lua "github.com/wippyai/go-lua"
 	ttyapi "github.com/wippyai/runtime/api/tty"
 	"github.com/wippyai/runtime/runtime/lua/engine/value"
+	"github.com/wippyai/runtime/runtime/lua/modules/gfx"
 )
 
 const (
 	surfaceTypeName = "tty.Surface"
 	maxSurfaceRows  = 16384
+
+	// One placement per cell of a large screen is already absurd; the bound
+	// exists so a runaway loop fails as an argument error instead of filling
+	// the terminal's memory with rasters nobody will remove.
+	maxSurfacePlacements = 1024
 )
 
 func init() {
@@ -143,20 +149,37 @@ func surfacePresent(l *lua.LState) int {
 				Visible: visible,
 			}
 		}
+		if value := options.RawGetString("images"); value != lua.LNil {
+			list, ok := value.(*lua.LTable)
+			if !ok {
+				return invalidArgument(l, "surface images must be a table")
+			}
+			placements, err := readPlacements(list)
+			if err != nil {
+				return invalidArgument(l, err.Error())
+			}
+			frame.Placements = placements
+		}
 	}
 
-	changed, written, err := surface.presentFrame(frame)
+	stats, err := surface.presentFrameStats(frame)
 	if err != nil {
 		l.Push(lua.LNil)
 		l.Push(lua.WrapErrorWithLua(l, err, "present terminal surface"))
 		return 2
 	}
-	stats := lua.CreateTable(0, 3)
-	stats.RawSetString("rows", lua.LInteger(rowCount))
-	stats.RawSetString("changed_rows", lua.LInteger(changed))
-	stats.RawSetString("bytes_written", lua.LInteger(written))
-	stats.Immutable = true
-	l.Push(stats)
+	result := lua.CreateTable(0, 4)
+	result.RawSetString("rows", lua.LInteger(rowCount))
+	result.RawSetString("changed_rows", lua.LInteger(stats.ChangedRows))
+	result.RawSetString("bytes_written", lua.LInteger(stats.Bytes))
+	// How many rasters actually went out, as opposed to how many the frame
+	// declared. A caller drawing chrome in pixels watches this: a placement
+	// is resent when a text row under it is repainted, so chrome cut into the
+	// wrong pieces resends everything on every keystroke — with nothing to
+	// see except the whole thing feeling slow.
+	result.RawSetString("placements_sent", lua.LInteger(stats.PlacementsSent))
+	result.Immutable = true
+	l.Push(result)
 	l.Push(lua.LNil)
 	return 2
 }
@@ -186,10 +209,12 @@ func (s *surfaceWrapper) present(rows []string) (int, int, error) {
 }
 
 func (s *surfaceWrapper) presentFrame(frame ttyapi.Frame) (int, int, error) {
-	var stats ttyapi.PresentStats
-	var err error
-	stats, err = s.backend.Present(frame)
+	stats, err := s.backend.Present(frame)
 	return stats.ChangedRows, stats.Bytes, err
+}
+
+func (s *surfaceWrapper) presentFrameStats(frame ttyapi.Frame) (ttyapi.PresentStats, error) {
+	return s.backend.Present(frame)
 }
 
 func surfaceInvalidate(l *lua.LState) int {
@@ -227,4 +252,55 @@ func surfaceGC(l *lua.LState) int {
 
 func (s *surfaceWrapper) close() error {
 	return s.backend.Close()
+}
+
+// readPlacements turns the images option into frame placements.
+//
+// The list is complete every frame, like the rows: a placement left out is
+// taken off the screen. That is what keeps a raster from outliving whatever
+// put it there — a picture nobody remembers is a picture nobody can remove.
+func readPlacements(list *lua.LTable) ([]ttyapi.Placement, error) {
+	count := list.Len()
+	if count > maxSurfacePlacements {
+		return nil, fmt.Errorf("surface frame exceeds placement limit")
+	}
+	placements := make([]ttyapi.Placement, 0, count)
+	for index := 1; index <= count; index++ {
+		entry, ok := list.RawGetInt(index).(*lua.LTable)
+		if !ok {
+			return nil, fmt.Errorf("surface image %d must be a table", index)
+		}
+		id, ok := entry.RawGetString("id").(lua.LString)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("surface image %d must have a non-empty id", index)
+		}
+		x, okX := integerValue(entry.RawGetString("x"))
+		y, okY := integerValue(entry.RawGetString("y"))
+		if !okX || !okY || x < 1 || y < 1 || x > maxTerminalDimension || y > maxTerminalDimension {
+			return nil, fmt.Errorf("surface image %s must have positive bounded x and y", id)
+		}
+		cols, okC := integerValue(entry.RawGetString("cols"))
+		rows, okR := integerValue(entry.RawGetString("rows"))
+		if !okC || !okR || cols < 1 || rows < 1 || cols > maxTerminalDimension || rows > maxTerminalDimension {
+			return nil, fmt.Errorf("surface image %s must have positive bounded cols and rows", id)
+		}
+
+		place := ttyapi.Placement{
+			ID: string(id), Row: y, Col: x, Cols: cols, Rows: rows,
+		}
+		// A raster is optional: leaving it out says "this one is already on
+		// screen, keep it". Requiring it every frame would mean shipping the
+		// pixels again to say nothing changed.
+		if value := entry.RawGetString("raster"); value != lua.LNil {
+			raster := gfx.CheckRaster(value)
+			if raster == nil {
+				return nil, fmt.Errorf("surface image %s raster must be a gfx.Raster", id)
+			}
+			place.Image = raster.Image()
+			place.Version = raster.Version()
+			place.Serial = raster.Serial()
+		}
+		placements = append(placements, place)
+	}
+	return placements, nil
 }

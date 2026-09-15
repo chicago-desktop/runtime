@@ -148,6 +148,7 @@ var surfaceStatsType = typ.NewRecord().
 	ReadonlyField("rows", typ.Integer).
 	ReadonlyField("changed_rows", typ.Integer).
 	ReadonlyField("bytes_written", typ.Integer).
+	ReadonlyField("placements_sent", typ.Integer).
 	Build()
 
 var surfaceType = typ.NewInterface("tty.Surface", []typ.Method{
@@ -167,12 +168,14 @@ var surfaceType = typ.NewInterface("tty.Surface", []typ.Method{
 		Returns(typ.Boolean, typ.NewOptional(typ.LuaError)).Build()},
 })
 
+var canvasColorsType = typ.NewRecord().OptField("foreground", typ.String).OptField("background", typ.String).Build()
+
 var canvasType = typ.NewInterface("tty.Canvas", []typ.Method{
 	{Name: "clear", Type: typ.Func().Param("self", typ.Self).OptParam("fill", typ.String).Returns(typ.Boolean).Build()},
 	{Name: "put", Type: typ.Func().Param("self", typ.Self).Param("x", typ.Integer).Param("y", typ.Integer).
-		Param("text", typ.String).OptParam("width", typ.Integer).Returns(typ.Boolean).Build()},
+		Param("text", typ.String).OptParam("width", typ.Integer).OptParam("defaults", canvasColorsType).Returns(typ.Boolean).Build()},
 	{Name: "put_rows", Type: typ.Func().Param("self", typ.Self).Param("x", typ.Integer).Param("y", typ.Integer).
-		Param("rows", typ.NewArray(typ.String)).OptParam("width", typ.Integer).Returns(typ.Boolean).Build()},
+		Param("rows", typ.NewArray(typ.String)).OptParam("width", typ.Integer).OptParam("defaults", canvasColorsType).Returns(typ.Boolean).Build()},
 	{Name: "rows", Type: typ.Func().Param("self", typ.Self).Returns(typ.NewArray(typ.String)).Build()},
 })
 

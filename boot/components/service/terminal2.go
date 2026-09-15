@@ -54,6 +54,8 @@ func Terminal2() boot.Component {
 
 			manager := terminal.NewManager(bus, dtt, registry, factory, logger)
 			handlers.RegisterListener("terminal.host", manager)
+			handlers.RegisterListener("terminal.ssh",
+				terminal.NewSSHManager(bus, dtt, registry, factory, logger))
 
 			logger.Info("terminal manager registered")
 			return ctx, nil

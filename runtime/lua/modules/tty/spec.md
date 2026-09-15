@@ -112,9 +112,17 @@ content.
 | Method | Purpose |
 |---|---|
 | `clear(fill?)` | Clear all cells, optionally repeating a styled fill |
-| `put(x, y, text, width?)` | Place and clip one styled row |
-| `put_rows(x, y, rows, width?)` | Place multiple styled rows atomically after validation |
+| `put(x, y, text, width?, defaults?)` | Place and clip one styled row |
+| `put_rows(x, y, rows, width?, defaults?)` | Place multiple styled rows atomically after validation |
 | `rows()` | Render the complete row array for a surface |
+
+Canvas placements accept optional `defaults = {foreground = "#c0c0c0",
+background = "#000000"}` after `width`. Colors may also be palette indices
+written as strings (`"0"` through `"255"`). These colors replace only unspecified
+foreground/background in decoded cells, including after SGR 0/39/49 resets.
+Explicit application colors, attributes and links remain intact. Defaults
+apply to this placement only; they do not change the physical terminal or
+later placements. Missing cells still require a separate background fill.
 
 Canvas coordinates are one-based but may be negative for clipping. Canvas area
 is capped at 262,144 cells.

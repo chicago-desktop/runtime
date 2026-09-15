@@ -43,6 +43,7 @@ func All() []boot.Component {
 		Time(),
 		TreeSitter(),
 		TTY(),
+		GFX(),
 		UUID(),
 		WebSocket(),
 		Workflow(),
