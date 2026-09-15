@@ -42,6 +42,40 @@ func TestApplyPreviewAppliesUnchangedNoDirectivePreview(t *testing.T) {
 	require.Equal(t, preview.Changes, clonePreviewChanges(runner.LastTransition()))
 }
 
+func TestPreviewUsesDurableStateWhileApplyStillFencesActiveOverlay(t *testing.T) {
+	ctx := context.Background()
+	reg, runner := previewRegistry(t, nil)
+	require.NoError(t, reg.LoadState(ctx, nil, version.FromParent(nil, regapi.RootVersion)))
+
+	entryID := regapi.NewID("installed.app", "service")
+	active := regapi.Entry{
+		ID: entryID, Kind: regapi.EntryKind,
+		Data: payload.New(map[string]any{"version": "v1"}),
+	}
+	_, err := reg.ApplyOverlay(ctx, "bee/delivery", 0, regapi.ChangeSet{{
+		Kind: regapi.EntryCreate, Entry: active,
+	}})
+	require.NoError(t, err)
+
+	update := regapi.ChangeSet{{Kind: regapi.EntryCreate, Entry: regapi.Entry{
+		ID: entryID, Kind: regapi.EntryKind,
+		Data: payload.New(map[string]any{"version": "v2"}),
+	}}}
+	preview, err := reg.PreviewAt(ctx, reg.Snapshot().Revision, update)
+	require.NoError(t, err, "an active application overlay must not become the durable preview baseline")
+	require.Len(t, preview.Changes, 1)
+	require.Equal(t, regapi.EntryCreate, preview.Changes[0].Kind)
+	require.Equal(t, "v2", preview.Changes[0].Entry.Data.Data().(map[string]any)["version"])
+	require.Equal(t, 1, runner.TransitionCount(), "preview must not alter the active overlay")
+
+	_, err = reg.ApplyPreview(ctx, preview.Revision, preview.Digest, update)
+	require.Error(t, err, "durable apply must still refuse an entry owned by a live overlay")
+	var typed apierror.Error
+	require.ErrorAs(t, err, &typed)
+	require.Equal(t, apierror.Conflict, typed.Kind())
+	require.Equal(t, active.Data.Data(), reg.Snapshot().Entries[0].Data.Data())
+}
+
 func TestApplyPreviewAppliesUnchangedDirectivePreviewAndIgnoresReturnedMutation(t *testing.T) {
 	ctx := context.Background()
 	var effects []*previewEffect

@@ -36,10 +36,14 @@ func (r *Reg) PreviewAt(ctx context.Context, revision uint64, changes registry.C
 	if revision == 0 || revision != base.Revision {
 		return nil, NewSnapshotRevisionConflictError(revision, base.Revision)
 	}
+	durable, err := r.stateAtVersion(ctx, base.Version)
+	if err != nil {
+		return nil, err
+	}
 	changes = clonePreviewChanges(changes)
 	canonicalizeChangeSetIDs(changes)
-	changes = normalizeRegistryMetadata(changes, base.Entries)
-	_, plan, err := r.expandLocked(ctx, changes, cloneOverlayState(base.Entries))
+	changes = normalizeRegistryMetadata(changes, durable)
+	_, plan, err := r.expandLocked(ctx, changes, durable)
 	if err != nil {
 		return nil, err
 	}
@@ -61,12 +65,9 @@ func (r *Reg) PreviewAt(ctx context.Context, revision uint64, changes registry.C
 		}
 	}()
 	all, history := plan.SplitScopes()
-	all, err = r.sortWithIndex(base.Entries, all)
+	all, err = r.sortWithIndex(durable, all)
 	if err != nil {
 		return nil, NewSortChangesError(err)
-	}
-	if err := r.validateDurableTransitionAgainstOverlays(all); err != nil {
-		return nil, err
 	}
 	resolution := base.Registry.Resolution
 	if plan.Resolution != nil {
