@@ -5,6 +5,7 @@ package gfx
 import (
 	"fmt"
 	"image"
+	"image/color/palette"
 	"image/draw"
 	"strings"
 
@@ -91,11 +92,61 @@ func gfxImageNew(l *lua.LState) int {
 		return 2
 	}
 
+	colors := 0
+	if options, ok := l.Get(2).(*lua.LTable); ok && options != nil {
+		if raw := options.RawGetString("colors"); raw != lua.LNil {
+			number, ok := integerValue(raw)
+			if !ok || number != reducedColors {
+				l.ArgError(2, fmt.Sprintf("colors must be %d", reducedColors))
+				return 0
+			}
+			colors = number
+		}
+	}
+
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	draw.Draw(img, img.Bounds(), decoded, bounds.Min, draw.Src)
+	if colors > 0 {
+		if !reduceColors(img, decoded) {
+			l.Push(lua.LNil)
+			l.Push(lua.LString("colors applies to opaque pictures only; this one has transparency"))
+			return 2
+		}
+	} else {
+		draw.Draw(img, img.Bounds(), decoded, bounds.Min, draw.Src)
+	}
 
 	value.PushTypedUserData(l, newRaster(img), rasterTypeName)
 	return 1
+}
+
+// reducedColors is the one palette size gfx.image reduces to.
+//
+// A picture with thousands of colours is the most expensive thing a sixel
+// terminal can be sent: the encoder has to quantize it on every send, for
+// every strip it is cut into. Reducing it once, when it is decoded, lets
+// every later encoding take the exact-palette path. 256 colours with error
+// diffusion is also what a 1995 display showed a photograph with.
+const reducedColors = 256
+
+// reduceColors draws src into dst through the 256-colour Plan 9 palette with
+// Floyd-Steinberg dithering. It refuses a picture with any transparency: the
+// palette has no transparent entry, and a hole painted black is worse than
+// the cost it saves.
+func reduceColors(dst *image.RGBA, src image.Image) bool {
+	bounds := src.Bounds()
+	if opaque, ok := src.(interface{ Opaque() bool }); !ok || !opaque.Opaque() {
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				if _, _, _, a := src.At(x, y).RGBA(); a != 0xffff {
+					return false
+				}
+			}
+		}
+	}
+	paletted := image.NewPaletted(image.Rect(0, 0, bounds.Dx(), bounds.Dy()), palette.Plan9)
+	draw.FloydSteinberg.Draw(paletted, paletted.Bounds(), src, bounds.Min)
+	draw.Draw(dst, dst.Bounds(), paletted, image.Point{}, draw.Src)
+	return true
 }
 
 // rasterBlit stamps one raster into another with its top-left at x, y.

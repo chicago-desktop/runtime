@@ -76,6 +76,9 @@ func ModuleTypes() *typio.Manifest {
 			Returns(rasterType).Build()},
 		{Name: "image", Type: typ.Func().
 			Param("data", typ.String).
+			OptParam("options", typ.NewRecord().
+				OptField("colors", typ.Integer).
+				Build()).
 			Returns(typ.NewOptional(rasterType), typ.NewOptional(typ.String)).Build()},
 		{Name: "font", Type: typ.Func().
 			Param("data", typ.String).
