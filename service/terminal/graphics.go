@@ -4,11 +4,10 @@ package terminal
 
 import (
 	"bytes"
-	"fmt"
 	"image"
 	"image/color"
 	"os"
-	"strings"
+	"strconv"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/ansi/kitty"
@@ -41,12 +40,6 @@ const (
 	graphicsSixel graphicsProtocol = ttyapi.GraphicsSixel
 )
 
-// dirtyRow is written into the remembered frame to force a repaint of a row
-// on the next comparison. Sixel has no way to take a picture off the screen
-// by name, so the only way to remove one is to paint over the cells it
-// occupied — and the surface has to be told those cells are stale.
-const dirtyRow = "\x00repaint"
-
 func environmentGraphics() graphicsProtocol {
 	protocol, _ := ttyapi.DetectGraphics(os.Getenv)
 	return graphicsProtocol(protocol)
@@ -66,14 +59,28 @@ type placementState struct {
 	col     int
 	cols    int
 	rows    int
+	z       int
 }
 
-// covers reports whether the placement occupies any cell of the given
-// one-based row. A text row repainted under a placement destroys the part of
-// the picture sharing those cells, and nothing would notice: for the row
-// itself nothing changed.
-func (p placementState) covers(row int) bool {
-	return row >= p.row && row < p.row+p.rows
+// damagedBy reports whether repainted cells fall inside the placement. Text
+// written over a picture destroys the part of it sharing those cells, and
+// nothing would notice: for the row itself nothing changed.
+func (p placementState) damagedBy(damage map[int][]span) bool {
+	from, to := max(0, p.col-1), max(0, p.col-1)+p.cols
+	for row := p.row; row < p.row+p.rows; row++ {
+		for _, part := range damage[row] {
+			if part.overlaps(from, to) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// overlaps reports whether two placements share any cell.
+func (p placementState) overlaps(q placementState) bool {
+	return p.row < q.row+q.rows && q.row < p.row+p.rows &&
+		p.col < q.col+q.cols && q.col < p.col+p.cols
 }
 
 func (p placementState) sameAs(place ttyapi.Placement) bool {
@@ -83,7 +90,7 @@ func (p placementState) sameAs(place ttyapi.Placement) bool {
 	// and leave the older one on screen.
 	return p.serial == place.Serial && p.version == place.Version &&
 		p.row == place.Row && p.col == place.Col &&
-		p.cols == place.Cols && p.rows == place.Rows
+		p.cols == place.Cols && p.rows == place.Rows && p.z == place.Z
 }
 
 func stateOf(place ttyapi.Placement) placementState {
@@ -94,6 +101,7 @@ func stateOf(place ttyapi.Placement) placementState {
 		col:     place.Col,
 		cols:    place.Cols,
 		rows:    place.Rows,
+		z:       place.Z,
 	}
 }
 
@@ -142,10 +150,7 @@ func appendPlaceOn(out []byte, protocol graphicsProtocol, place ttyapi.Placement
 	err := kitty.EncodeGraphics(&buf, place.Image, &kitty.Options{
 		Action: kitty.TransmitAndPut,
 		ID:     graphicsID(place.ID),
-		// A named placement, so a later put by id REPLACES it. Without p= every
-		// put creates one more placement, and a picture that moved would stay
-		// on screen twice.
-		PlacementID: kittyPlacement,
+		// No placement id: see appendUnplace.
 		ImageWidth:  bounds.Dx(),
 		ImageHeight: bounds.Dy(),
 		// Silence the terminal's acknowledgement. Without it the reply
@@ -158,6 +163,7 @@ func appendPlaceOn(out []byte, protocol graphicsProtocol, place ttyapi.Placement
 		Chunk:        true,
 		Columns:      place.Cols,
 		Rows:         place.Rows,
+		Z:            place.Z,
 		// Cursor restoration cannot undo a scroll caused by placing an image
 		// on the last row. Full-screen placements must not advance it.
 		DoNotMoveCursor: true,
@@ -169,6 +175,7 @@ func appendPlaceOn(out []byte, protocol graphicsProtocol, place ttyapi.Placement
 		return out
 	}
 
+	out = appendUnplace(out, place.ID)
 	out = append(out, "\x1b[s"...)
 	out = appendCursorTo(out, place.Row, place.Col)
 	out = append(out, buf.Bytes()...)
@@ -176,27 +183,48 @@ func appendPlaceOn(out []byte, protocol graphicsProtocol, place ttyapi.Placement
 	return out
 }
 
-// kittyPlacement is the placement id every raster is put under. One picture
-// has one placement on screen, so a constant is enough: what matters is that
-// transmit and put name the same one.
-const kittyPlacement = 1
+// appendUnplace takes every placement of one image off the screen and keeps
+// the image, so the put or transmit that follows is the only placement.
+//
+// Placements carry no placement id (p=) on purpose. WezTerm copies a cell's
+// image attachments when it attaches a new one and then re-attaches every
+// attachment that has a placement id on top of the copy
+// (wezterm-surface VecStorage::set_cell), so each new placement in a cell
+// that already holds another doubles that cell's stack. A wallpaper strip
+// under a ticking widget reached 26 million quads in about forty frames and
+// took the terminal down. Without p= nothing is re-attached; and without p=
+// kitty would add a placement on every put, which this delete prevents.
+func appendUnplace(out []byte, name string) []byte {
+	options := kitty.Options{
+		Action: kitty.Delete,
+		Delete: kitty.DeleteID,
+		Quiet:  2,
+		ID:     graphicsID(name),
+	}
+	out = append(out, "\x1b_G"...)
+	out = append(out, options.String()...)
+	out = append(out, '\x1b', '\\')
+	return out
+}
 
 // appendPut shows again an image the terminal already holds.
 //
 // Kitty keeps a transmitted image until it is deleted, so a raster whose
 // pixels did not change — only the text row under it was repainted, or it
-// moved — needs a put by id, not the full RGBA again. The put names the same
-// placement as the transmit, which makes it a replacement, not a second copy.
+// moved — needs a put by id, not the full RGBA again. The old placement is
+// taken off first (appendUnplace), which makes the put a replacement, not a
+// second copy.
 func appendPut(out []byte, place ttyapi.Placement) []byte {
 	options := kitty.Options{
 		Action:          kitty.Put,
 		ID:              graphicsID(place.ID),
-		PlacementID:     kittyPlacement,
 		Quiet:           2,
 		Columns:         place.Cols,
 		Rows:            place.Rows,
+		Z:               place.Z,
 		DoNotMoveCursor: true,
 	}
+	out = appendUnplace(out, place.ID)
 	out = append(out, "\x1b[s"...)
 	out = appendCursorTo(out, place.Row, place.Col)
 	out = append(out, "\x1b_G"...)
@@ -219,8 +247,13 @@ const defaultEncodedLimit = 32 << 20
 // did not change but shares a row with repainted text used to pay it again on
 // every keystroke. Position is part of the key: screen-origin sixel bakes the
 // cell offset into the payload. The cell size is too, for the same reason.
+//
+// For sixel the cache holds the payload, not the command: row and col are
+// zero in the key and pad (see sixelPad) takes their place, so a picture that
+// moves within one pad class is framed again, not encoded again.
 type encodedKey struct {
 	protocol  graphicsProtocol
+	pad       int
 	serial    uint64
 	version   uint64
 	row       int
@@ -230,15 +263,20 @@ type encodedKey struct {
 	cellW     int
 	cellH     int
 	cellKnown bool
+	z         int
 }
 
 func keyOf(protocol graphicsProtocol, place ttyapi.Placement, probe *ttyapi.Probe) encodedKey {
 	cellW, cellH, known := probe.CellSize()
-	return encodedKey{
+	key := encodedKey{
 		protocol: protocol, serial: place.Serial, version: place.Version,
 		row: place.Row, col: place.Col, cols: place.Cols, rows: place.Rows,
-		cellW: cellW, cellH: cellH, cellKnown: known,
+		cellW: cellW, cellH: cellH, cellKnown: known, z: place.Z,
 	}
+	if protocol == graphicsSixel {
+		key.row, key.col, key.z, key.pad = 0, 0, 0, sixelPad(place, probe)
+	}
+	return key
 }
 
 // encodedEntry is the last encoding of one placement.
@@ -276,20 +314,46 @@ func appendDelete(out []byte, name string) []byte {
 // them. The caller's cols and rows therefore describe the damage rectangle,
 // not a scale — sizing the raster is the caller's business.
 func appendSixel(out []byte, place ttyapi.Placement, probe *ttyapi.Probe) []byte {
-	if cw, ch, known := probe.CellSize(); known {
-		return appendScreenSixel(out, place, cw, ch)
+	pad := sixelPad(place, probe)
+	return appendSixelFramed(out, place, probe, sixelPayload(place.Image, pad), pad)
+}
+
+// sixelPad is the only thing about a placement's position that changes its
+// encoding: screen-origin sixel starts the picture on a six-row band, so the
+// picture is encoded with this many transparent rows above it. Everything
+// else about the position is framing, added by appendSixelFramed.
+func sixelPad(place ttyapi.Placement, probe *ttyapi.Probe) int {
+	if _, ch, known := probe.CellSize(); known {
+		return (max(0, place.Row-1) * ch) % 6
 	}
+	return 0
+}
+
+// sixelPayload encodes a picture with pad transparent rows above it: raster
+// attributes, palette and bands. Nil means it would not encode.
+func sixelPayload(img image.Image, pad int) []byte {
 	var payload bytes.Buffer
-	encoder := sixel.Encoder{}
-	if err := encoder.Encode(&payload, place.Image); err != nil {
+	if err := encodeSixel(&payload, img, pad); err != nil {
+		return nil
+	}
+	return payload.Bytes()
+}
+
+// appendSixelFramed puts an encoded payload at the placement's position. The
+// payload is the same wherever the picture goes within one pad class, which
+// is what lets the surface keep one encoding for a picture that moves.
+func appendSixelFramed(out []byte, place ttyapi.Placement, probe *ttyapi.Probe, payload []byte, pad int) []byte {
+	if len(payload) == 0 {
 		return out
 	}
-
+	if cw, ch, known := probe.CellSize(); known {
+		return appendScreenSixel(out, place, payload, pad, cw, ch)
+	}
 	out = append(out, "\x1b[s"...)
 	out = appendCursorTo(out, place.Row, place.Col)
 	// p2 = 1: with 0 every terminal tried leaves a black bar where the
 	// background should show through.
-	out = append(out, ansi.SixelGraphics(0, 1, 0, payload.Bytes())...)
+	out = append(out, ansi.SixelGraphics(0, 1, 0, payload)...)
 	out = append(out, "\x1b[u"...)
 	return out
 }
@@ -319,35 +383,48 @@ func (img bandAlignedImage) At(x, y int) color.Color {
 // past the bottom, even if the image itself fits. Saving the cursor does not
 // undo that scroll. Translate the compact payload to screen coordinates with
 // transparent bands/columns, so drawing the taskbar cannot move any text.
-func appendScreenSixel(out []byte, place ttyapi.Placement, cellW, cellH int) []byte {
+//
+// The payload was encoded with pad = y % 6 transparent rows on top; the
+// whole bands above it become '-' and the column offset a transparent run
+// after every line start.
+func appendScreenSixel(out []byte, place ttyapi.Placement, payload []byte, pad, cellW, cellH int) []byte {
 	x, y := max(0, place.Col-1)*cellW, max(0, place.Row-1)*cellH
-	aligned := bandAlignedImage{Image: place.Image, padding: y % 6}
-	var encoded bytes.Buffer
-	if err := (&sixel.Encoder{}).Encode(&encoded, aligned); err != nil {
+	_, headerLen := sixel.DecodeRaster(payload)
+	if headerLen == 0 || y%6 != pad {
 		return out
 	}
-	data := encoded.Bytes()
-	_, headerLen := sixel.DecodeRaster(data)
-	if headerLen == 0 {
-		return out
-	}
-	var payload strings.Builder
 	bounds := place.Image.Bounds()
-	fmt.Fprintf(&payload, "\"1;1;%d;%d", x+bounds.Dx(), y+bounds.Dy())
-	payload.WriteString(strings.Repeat("-", y/6))
-	skip := ""
+	var skip []byte
 	if x > 0 {
-		skip = fmt.Sprintf("!%d?", x)
+		skip = append(append([]byte("!"), strconv.Itoa(x)...), '?')
 	}
-	payload.WriteString(skip)
-	for _, b := range data[headerLen:] {
-		payload.WriteByte(b)
-		if b == '-' || b == '$' {
-			payload.WriteString(skip)
+
+	out = append(out, "\x1b[s\x1b[?80h"...)
+	out = append(out, "\x1bP0;1q"...)
+	out = append(out, '"', '1', ';', '1', ';')
+	out = strconv.AppendInt(out, int64(x+bounds.Dx()), 10)
+	out = append(out, ';')
+	out = strconv.AppendInt(out, int64(y+bounds.Dy()), 10)
+	for range y / 6 {
+		out = append(out, '-')
+	}
+	out = append(out, skip...)
+	body := payload[headerLen:]
+	if len(skip) == 0 {
+		out = append(out, body...)
+	} else {
+		for len(body) > 0 {
+			next := bytes.IndexAny(body, "-$")
+			if next < 0 {
+				out = append(out, body...)
+				break
+			}
+			out = append(out, body[:next+1]...)
+			out = append(out, skip...)
+			body = body[next+1:]
 		}
 	}
-	out = append(out, "\x1b[s\x1b[?80h"...)
-	out = append(out, ansi.SixelGraphics(0, 1, 0, []byte(payload.String()))...)
+	out = append(out, "\x1b\\"...)
 	out = append(out, "\x1b[?80l\x1b[u"...)
 	return out
 }

@@ -21,6 +21,9 @@ type Surface struct {
 	// encode writes the command that places one raster. Tests replace it to
 	// count encodings; nil means appendPlaceOn with the surface's probe.
 	encode func(out []byte, protocol graphicsProtocol, place ttyapi.Placement) []byte
+	// encodeSixel is encode for sixel, which caches the payload rather than
+	// the command; nil means sixelPayload.
+	encodeSixel func(place ttyapi.Placement, pad int) []byte
 	// The last encoding of each placement, by id. A raster sent again with
 	// the same key (see encodedKey) is copied from here instead of encoded.
 	encoded map[string]encodedEntry
@@ -29,10 +32,13 @@ type Surface struct {
 	// the terminal's side, so the surface is the only thing that knows they
 	// exist — nobody else can take them away.
 	placements map[string]placementState
-	graphics   graphicsProtocol
-	rows       []string
-	scratch    []byte
-	frameSeq   uint64
+	// forced are the columns of each one-based row that a picture left and
+	// that must be repainted whatever the text says.
+	forced   map[int][]span
+	graphics graphicsProtocol
+	rows     []string
+	scratch  []byte
+	frameSeq uint64
 	// encodedLimit caps encodedBytes; zero turns the cache off.
 	encodedLimit int
 	encodedBytes int
@@ -55,7 +61,7 @@ func NewProbedSurface(out io.Writer, opts ttyapi.SurfaceOptions, probe *ttyapi.P
 		probe = ttyapi.ProcessProbe()
 	}
 	return &Surface{
-		out: out, opts: opts, graphics: probedGraphics(probe), probe: probe,
+		out: traced(out), opts: opts, graphics: probedGraphics(probe), probe: probe,
 		encodedLimit: defaultEncodedLimit,
 	}
 }
@@ -91,10 +97,10 @@ func (s *Surface) Present(frame ttyapi.Frame) (ttyapi.PresentStats, error) {
 	if len(s.rows) > limit {
 		limit = len(s.rows)
 	}
-	// Which rows were repainted. A placement sharing cells with one of them
-	// lost that part of its picture, and nothing else would notice: for the
-	// row itself the text is simply what it now says.
-	var repainted []int
+	// What was repainted, by row and column. A placement sharing cells with
+	// it lost that part of its picture, and nothing else would notice: for
+	// the row itself the text is simply what it now says.
+	damage := make(map[int][]span)
 	for index := 0; index < limit; index++ {
 		current, previous := "", ""
 		if index < len(rows) {
@@ -103,21 +109,45 @@ func (s *Surface) Present(frame ttyapi.Frame) (ttyapi.PresentStats, error) {
 		if index < len(s.rows) {
 			previous = s.rows[index]
 		}
-		if !s.invalid && current == previous && index < len(rows) && index < len(s.rows) {
+		forced := s.forced[index+1]
+		both := index < len(rows) && index < len(s.rows)
+		if !s.invalid && current == previous && both && len(forced) == 0 {
+			continue
+		}
+		if !s.invalid && both && plainRow(current) && plainRow(previous) {
+			// By cells: only what changed is written, and only the pictures
+			// over those columns are damaged.
+			reach := 0
+			for _, f := range forced {
+				reach = max(reach, f.to)
+			}
+			line := cellRow(current, reach)
+			spans := changedSpans(cellRow(previous, reach), line, forced)
+			if len(spans) == 0 {
+				continue
+			}
+			changed++
+			for _, part := range spans {
+				output = appendSpan(output, index+1, line, part)
+			}
+			damage[index+1] = spans
 			continue
 		}
 		changed++
-		if len(s.placements) > 0 {
-			repainted = append(repainted, index+1)
-		}
+		damage[index+1] = []span{wholeRow}
 		output = append(output, '\x1b', '[')
 		output = strconv.AppendInt(output, int64(index+1), 10)
 		output = append(output, ';', '1', 'H')
+		// The line is erased before it is written, not after: a row that
+		// fills the last column leaves the cursor waiting to wrap, and an
+		// erase from there takes the last column with it.
+		output = append(output, "\x1b[0m\x1b[2K"...)
 		output = append(output, current...)
-		output = append(output, "\x1b[0m\x1b[K"...)
+		output = append(output, "\x1b[0m"...)
 	}
+	s.forced = nil
 
-	output, placementsSent := s.appendPlacements(output, frame.Placements, repainted)
+	output, placementsSent := s.appendPlacements(output, frame.Placements, damage)
 	if s.invalid && limit == 0 {
 		output = append(output, "\x1b[H\x1b[0m\x1b[J"...)
 	}
@@ -193,6 +223,7 @@ func (s *Surface) Close() error {
 		return s.closeErr
 	}
 	s.closed = true
+	defer closeTrace(s.out)
 	if !s.acquired {
 		return nil
 	}
@@ -244,7 +275,7 @@ func appendCursorTo(out []byte, row, column int) []byte {
 // Placements are declarative and complete: one missing from the frame is
 // taken off the screen. A caller that forgets a placement does not leak it,
 // and a caller that repeats an unchanged one does not pay for it twice.
-func (s *Surface) appendPlacements(out []byte, places []ttyapi.Placement, repainted []int) ([]byte, int) {
+func (s *Surface) appendPlacements(out []byte, places []ttyapi.Placement, damage map[int][]span) ([]byte, int) {
 	sent := 0
 	if s.graphics == graphicsNone {
 		// The terminal shows no graphics. Sending anyway would spill the
@@ -260,17 +291,34 @@ func (s *Surface) appendPlacements(out []byte, places []ttyapi.Placement, repain
 	}
 
 	seen := make(map[string]bool, len(places))
+	// What this frame has painted so far. Sixel has no layers: a picture
+	// sent now lies over everything the terminal already shows, so a later
+	// placement it overlaps — later in the list, higher in the stack — must
+	// be sent again after it, or a changed wallpaper strip covers an
+	// unchanged widget on the same row.
+	var painted []placementState
+	z := 0
 	for _, place := range places {
 		if place.ID == "" || place.Cols <= 0 || place.Rows <= 0 {
 			continue
+		}
+		// Sixel has no z: the order of sending is the stack (see painted).
+		if s.graphics == graphicsKitty {
+			z++
+			place.Z = z
+		} else {
+			place.Z = 0
 		}
 		seen[place.ID] = true
 		previous, known := s.placements[place.ID]
 
 		damaged := s.invalid || !known || !previous.sameAs(place)
 		if !damaged {
-			for _, row := range repainted {
-				if previous.covers(row) {
+			damaged = previous.damagedBy(damage)
+		}
+		if !damaged && s.graphics == graphicsSixel {
+			for _, below := range painted {
+				if below.overlaps(previous) {
 					damaged = true
 					break
 				}
@@ -300,6 +348,9 @@ func (s *Surface) appendPlacements(out []byte, places []ttyapi.Placement, repain
 			out = s.appendEncoded(out, place)
 		}
 		s.placements[place.ID] = stateOf(place)
+		if s.graphics == graphicsSixel {
+			painted = append(painted, stateOf(place))
+		}
 		sent++
 	}
 
@@ -322,31 +373,44 @@ func (s *Surface) appendPlacements(out []byte, places []ttyapi.Placement, repain
 // same key was encoded before.
 func (s *Surface) appendEncoded(out []byte, place ttyapi.Placement) []byte {
 	key := keyOf(s.graphics, place, s.probe)
-	if entry, ok := s.encoded[place.ID]; ok && entry.key == key {
+	if s.graphics == graphicsSixel {
+		return appendSixelFramed(out, place, s.probe, s.cachedEncoding(place.ID, key, func() []byte {
+			if s.encodeSixel != nil {
+				return s.encodeSixel(place, key.pad)
+			}
+			return sixelPayload(place.Image, key.pad)
+		}), key.pad)
+	}
+	return append(out, s.cachedEncoding(place.ID, key, func() []byte {
+		if s.encode != nil {
+			return s.encode(nil, s.graphics, place)
+		}
+		return appendPlaceOn(nil, s.graphics, place, s.probe)
+	})...)
+}
+
+// cachedEncoding returns the bytes kept under id when their key matches, and
+// otherwise encodes, keeps and returns fresh ones.
+func (s *Surface) cachedEncoding(id string, key encodedKey, encode func() []byte) []byte {
+	if entry, ok := s.encoded[id]; ok && entry.key == key {
 		entry.used = s.frameSeq
-		s.encoded[place.ID] = entry
-		return append(out, entry.bytes...)
+		s.encoded[id] = entry
+		return entry.bytes
 	}
-	start := len(out)
-	if s.encode != nil {
-		out = s.encode(out, s.graphics, place)
-	} else {
-		out = appendPlaceOn(out, s.graphics, place, s.probe)
-	}
-	s.dropEncoded(place.ID)
-	// A failed encoding writes nothing, and nothing is not worth remembering:
-	// the next send tries the encoder again.
-	if s.encodedLimit <= 0 || len(out) == start {
-		return out
+	fresh := encode()
+	s.dropEncoded(id)
+	// A failed encoding is nothing, and nothing is not worth remembering: the
+	// next send tries the encoder again.
+	if s.encodedLimit <= 0 || len(fresh) == 0 {
+		return fresh
 	}
 	if s.encoded == nil {
 		s.encoded = make(map[string]encodedEntry)
 	}
-	payload := append([]byte(nil), out[start:]...)
-	s.encoded[place.ID] = encodedEntry{bytes: payload, key: key, used: s.frameSeq}
-	s.encodedBytes += len(payload)
-	s.trimEncoded(place.ID)
-	return out
+	s.encoded[id] = encodedEntry{bytes: fresh, key: key, used: s.frameSeq}
+	s.encodedBytes += len(fresh)
+	s.trimEncoded(id)
+	return fresh
 }
 
 // trimEncoded evicts the least recently written entries until the cache fits
@@ -378,7 +442,7 @@ func (s *Surface) dropEncoded(id string) {
 	}
 }
 
-// forgetVacatedRows marks the rows a picture is leaving as stale.
+// forgetVacatedRows marks the cells a picture is leaving as stale.
 //
 // Only sixel needs it — kitty removes by identifier — but the rule is the
 // same either way: a rectangle a picture no longer occupies has to be painted
@@ -402,9 +466,13 @@ func (s *Surface) forgetVacatedRows(places []ttyapi.Placement) {
 			state.cols == place.Cols && state.rows == place.Rows {
 			continue
 		}
+		if s.forced == nil {
+			s.forced = make(map[int][]span)
+		}
+		left := span{max(0, state.col-1), max(0, state.col-1) + state.cols}
 		for row := state.row; row < state.row+state.rows; row++ {
 			if row >= 1 && row <= len(s.rows) {
-				s.rows[row-1] = dirtyRow
+				s.forced[row] = append(s.forced[row], left)
 			}
 		}
 	}

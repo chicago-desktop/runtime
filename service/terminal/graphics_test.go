@@ -229,12 +229,16 @@ func TestGraphicsIDIsStableAndNeverZero(t *testing.T) {
 	require.NotEqual(t, graphicsID("my_computer"), graphicsID("recycle_bin"))
 }
 
-func TestPlacementCoversOnlyItsOwnRows(t *testing.T) {
-	state := placementState{row: 4, rows: 3}
-	require.False(t, state.covers(3))
-	require.True(t, state.covers(4))
-	require.True(t, state.covers(6))
-	require.False(t, state.covers(7))
+func TestPlacementIsDamagedOnlyByItsOwnCells(t *testing.T) {
+	// Rows 4-6, columns 10-14 (one-based); spans are zero-based, end exclusive.
+	state := placementState{row: 4, rows: 3, col: 10, cols: 5}
+	require.False(t, state.damagedBy(map[int][]span{3: {wholeRow}}), "the row above")
+	require.True(t, state.damagedBy(map[int][]span{4: {wholeRow}}))
+	require.True(t, state.damagedBy(map[int][]span{6: {{13, 14}}}), "its last column")
+	require.False(t, state.damagedBy(map[int][]span{7: {wholeRow}}), "the row below")
+	require.False(t, state.damagedBy(map[int][]span{5: {{0, 9}}}), "left of it")
+	require.False(t, state.damagedBy(map[int][]span{5: {{14, 30}}}), "right of it")
+	require.True(t, state.damagedBy(map[int][]span{5: {{0, 9}, {8, 10}}}), "a span reaching its first column")
 }
 
 func TestSurfacePlacementSurvivesInvalidate(t *testing.T) {
@@ -305,7 +309,8 @@ func TestSurfaceRepaintsCellsWhenASixelPictureLeaves(t *testing.T) {
 
 	painted := output.String()
 	require.Contains(t, painted, "one", "the covered rows must be painted again")
-	require.Contains(t, painted, "three", "the whole rectangle must be painted again")
+	require.Contains(t, painted, "\x1b[3;1H\x1b[mthre", "the whole rectangle must be painted again")
+	require.NotContains(t, painted, "three", "only its four columns: the fifth cell was never covered")
 	require.NotContains(t, painted, "four", "rows the picture never covered stay untouched")
 }
 
@@ -378,9 +383,19 @@ func TestOnlyChromeSharingRowsWithTextIsResent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second frame: %v", err)
 	}
-	if stats.PlacementsSent != 2 {
-		t.Fatalf("a keystroke must cost the two side borders and nothing else, sent %d",
-			stats.PlacementsSent)
+	if stats.PlacementsSent != 0 {
+		t.Fatalf("a keystroke between the borders touches no picture, sent %d", stats.PlacementsSent)
+	}
+
+	// Text that reaches the right border's column damages that border only.
+	changed = append([]string(nil), changed...)
+	changed[5] = "первый кадр!" + strings.Repeat("x", 32) // to column 44
+	stats, err = surface.Present(ttyapi.Frame{Rows: changed, Placements: chrome(1)})
+	if err != nil {
+		t.Fatalf("wide frame: %v", err)
+	}
+	if stats.PlacementsSent != 1 {
+		t.Fatalf("text under the right border must resend it and nothing else, sent %d", stats.PlacementsSent)
 	}
 
 	// And a frame where nothing at all moved must cost nothing.
@@ -537,7 +552,16 @@ func TestTaskbarPlacementDoesNotScrollTheTerminal(t *testing.T) {
 		require.Equal(t, 1, stats.PlacementsSent)
 		stream := output.String()
 		require.Contains(t, stream, "\x1b[24;1H", "the visible bar belongs to its mouse row")
+		// The placing command, not the delete that clears the old placement.
 		start := strings.Index(stream, "\x1b_G")
+		for start >= 0 && strings.HasPrefix(stream[start:], "\x1b_Gq=2,i=") && strings.Contains(stream[start:start+40], "a=d") {
+			next := strings.Index(stream[start+3:], "\x1b_G")
+			if next < 0 {
+				start = -1
+				break
+			}
+			start += 3 + next
+		}
 		require.NotEqual(t, -1, start)
 		end := strings.IndexByte(stream[start:], ';')
 		require.Positive(t, end)

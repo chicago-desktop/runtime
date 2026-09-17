@@ -61,6 +61,12 @@ type Placement struct {
 	Col    int
 	Cols   int
 	Rows   int
+
+	// Z is the stacking order among pictures that overlap. The surface sets
+	// it from the frame's order — later is higher — so callers leave it zero.
+	// Kitty draws equal z in the order of image ids, and ids here are hashes
+	// of names: without it a wallpaper strip could lie over a widget.
+	Z int
 }
 
 // Frame augments surface rows with optional terminal state. A nil Cursor lets

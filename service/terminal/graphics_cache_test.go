@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,6 +33,11 @@ func probedSurface(out *bytes.Buffer, protocol graphicsProtocol) (*Surface, *enc
 		dst = appendPlace(dst, p, place)
 		probe.last = append([]byte(nil), dst[start:]...)
 		return dst
+	}
+	surface.encodeSixel = func(place ttyapi.Placement, pad int) []byte {
+		probe.calls++
+		probe.last = sixelPayload(place.Image, pad)
+		return probe.last
 	}
 	return surface, probe
 }
@@ -108,11 +114,48 @@ func TestAChangedRasterIsEncodedAgain(t *testing.T) {
 	require.Equal(t, 1, stats.PlacementsSent)
 	require.Equal(t, 2, probe.calls, "a new version must be encoded, not copied")
 
-	// A moved picture is a different payload too: screen-origin sixel carries
-	// the cell offset in its bytes.
+	// A moved picture is the same payload in a different frame: the cache
+	// holds the payload, and the position is added when it is sent.
 	_, err = surface.Present(ttyapi.Frame{Rows: screen("x"), Placements: client(img, 2, 3)})
 	require.NoError(t, err)
-	require.Equal(t, 3, probe.calls, "a moved sixel picture must be encoded at its new place")
+	require.Equal(t, 2, probe.calls, "a moved sixel picture is framed again, not encoded")
+}
+
+// Screen-origin sixel starts a picture on a six-row band, so its payload
+// depends on (row-1)*cellH % 6 and on nothing else about the position.
+// With 10×20 cells rows 1 and 4 share a class (0 and 60) and row 2 does not
+// (20 % 6 = 2).
+func TestAMovedSixelPictureIsEncodedOncePerBandClass(t *testing.T) {
+	var out bytes.Buffer
+	surface, probe := probedSurface(&out, graphicsSixel)
+	cells := ttyapi.NewProbe(func(string) string { return "" })
+	cells.SetCellSize(10, 20)
+	surface.probe = cells
+	// Few enough colours for the exact-palette encoder, whose output is
+	// deterministic; the general one orders its palette by map iteration.
+	img := fullPalette()
+	rows := []string{"1", "2", "3", "4", "5", "6", "7", "8"}
+	at := func(row, col int) ttyapi.Placement {
+		return ttyapi.Placement{ID: "icon", Image: img, Version: 1, Serial: 1, Row: row, Col: col, Cols: 4, Rows: 2}
+	}
+
+	_, err := surface.Present(ttyapi.Frame{Rows: rows, Placements: []ttyapi.Placement{at(1, 1)}})
+	require.NoError(t, err)
+	require.Equal(t, 1, probe.calls)
+
+	out.Reset()
+	_, err = surface.Present(ttyapi.Frame{Rows: rows, Placements: []ttyapi.Placement{at(4, 7)}})
+	require.NoError(t, err)
+	require.Equal(t, 1, probe.calls, "same band class: the payload is reused")
+	fresh := appendSixel(nil, at(4, 7), cells)
+	require.NotEmpty(t, fresh)
+	require.True(t, bytes.Contains(out.Bytes(), fresh), "the reused payload frames to exactly a fresh encoding")
+
+	out.Reset()
+	_, err = surface.Present(ttyapi.Frame{Rows: rows, Placements: []ttyapi.Placement{at(2, 7)}})
+	require.NoError(t, err)
+	require.Equal(t, 2, probe.calls, "another band class needs its own payload")
+	require.True(t, bytes.Contains(out.Bytes(), appendSixel(nil, at(2, 7), cells)))
 }
 
 func TestARemovedPlacementLeavesTheCache(t *testing.T) {
@@ -140,7 +183,8 @@ func TestKittyPutsAKnownImageByIDInsteadOfTransmittingIt(t *testing.T) {
 	_, err := surface.Present(ttyapi.Frame{Rows: screen("x"), Placements: client(img, 1, 2)})
 	require.NoError(t, err)
 	require.Contains(t, out.String(), "a=T")
-	require.Contains(t, out.String(), "p=1", "the placement is named, so a later put replaces it")
+	require.NotContains(t, out.String(), "p=", "no placement id: WezTerm doubles cells holding placements with one")
+	require.Contains(t, out.String(), ",d=i,a=d", "the old placements of the image go first, the image stays")
 	require.Equal(t, 1, probe.calls)
 
 	out.Reset()
@@ -149,7 +193,8 @@ func TestKittyPutsAKnownImageByIDInsteadOfTransmittingIt(t *testing.T) {
 	require.Equal(t, 1, stats.PlacementsSent)
 	require.Contains(t, out.String(), "a=p", "the row under it was repainted: put it again by id")
 	require.Contains(t, out.String(), id)
-	require.Contains(t, out.String(), "p=1", "the same placement, so it replaces rather than adds")
+	require.Less(t, strings.Index(out.String(), ",d=i,a=d"), strings.Index(out.String(), "a=p"),
+		"the old placement is taken off before the put, so it replaces rather than adds")
 	require.NotContains(t, out.String(), "a=T", "the terminal still holds the image")
 	require.Equal(t, 1, probe.calls)
 

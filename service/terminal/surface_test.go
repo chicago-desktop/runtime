@@ -49,8 +49,8 @@ func TestSurfaceInvalidateRetainsExtentAndForcesCompleteCommit(t *testing.T) {
 	stats, err := surface.Present(ttyapi.Frame{Rows: []string{"one"}})
 	require.NoError(t, err)
 	require.Equal(t, 3, stats.ChangedRows)
-	require.Contains(t, output.String(), "\x1b[2;1H\x1b[0m\x1b[K")
-	require.Contains(t, output.String(), "\x1b[3;1H\x1b[0m\x1b[K")
+	require.Contains(t, output.String(), "\x1b[2;1H\x1b[0m\x1b[2K")
+	require.Contains(t, output.String(), "\x1b[3;1H\x1b[0m\x1b[2K")
 }
 
 func TestSurfaceInvalidateCommitsEmptyFrame(t *testing.T) {
