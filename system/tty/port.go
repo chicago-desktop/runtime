@@ -74,8 +74,10 @@ func (s *surface) Present(frame ttyapi.Frame) (ttyapi.PresentStats, error) {
 	// A nil cursor means row-only presentation and preserves terminal state,
 	// matching the Frame contract and physical surface implementation.
 	cursorChanged := frame.Cursor != nil && !sameCursor(ss.cursor, frame.Cursor)
-	if forced || changed != 0 || cursorChanged {
+	placements, placementsChanged := mergePlacements(ss.placements, frame.Placements)
+	if forced || changed != 0 || cursorChanged || placementsChanged {
 		ss.rows = append([]string(nil), frame.Rows...)
+		ss.placements = placements
 		ss.invalid = false
 		if frame.Cursor != nil {
 			copy := *frame.Cursor
@@ -88,7 +90,71 @@ func (s *surface) Present(frame ttyapi.Frame) (ttyapi.PresentStats, error) {
 		}
 	}
 	ss.mu.Unlock()
-	return ttyapi.PresentStats{Rows: len(frame.Rows), ChangedRows: changed}, nil
+	return ttyapi.PresentStats{Rows: len(frame.Rows), ChangedRows: changed,
+		PlacementsSent: len(placements)}, nil
+}
+
+// mergePlacements turns the frame's placements into the complete set a viewer
+// can draw from on its own, and reports whether that set differs from the one
+// standing on the screen.
+//
+// A frame is declarative and complete, so the result is built from it alone —
+// what it leaves out is gone. The only thing carried over is pixels: a
+// placement presented without an image means "the picture under this id has
+// not changed", and a viewer that attached after the frame that carried it
+// would otherwise have nothing to draw.
+//
+// A placement with no image whose id was never seen is left out. Its pixels
+// have never existed anywhere, so no viewer could draw it; keeping it would
+// put a picture on the screen that is not a picture.
+//
+// Sameness is id, version, serial, geometry and stacking — the identity the
+// physical surface already uses to decide whether pixels must be resent. The
+// images themselves are never compared: Version and Serial exist precisely so
+// that nobody has to, and comparing two image.Image values can panic on a
+// type that is not comparable.
+func mergePlacements(prev, next []ttyapi.Placement) ([]ttyapi.Placement, bool) {
+	if len(prev) == 0 && len(next) == 0 {
+		return nil, false
+	}
+	out := make([]ttyapi.Placement, 0, len(next))
+	for _, placement := range next {
+		if placement.Image == nil {
+			known, ok := findPlacement(prev, placement.ID)
+			if !ok || known.Image == nil {
+				continue
+			}
+			placement.Image = known.Image
+		}
+		out = append(out, placement)
+	}
+	if len(out) == 0 {
+		out = nil
+	}
+	return out, !samePlacements(prev, out)
+}
+
+func findPlacement(in []ttyapi.Placement, id string) (ttyapi.Placement, bool) {
+	for _, placement := range in {
+		if placement.ID == id {
+			return placement, true
+		}
+	}
+	return ttyapi.Placement{}, false
+}
+
+func samePlacements(a, b []ttyapi.Placement) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].ID != b[i].ID || a[i].Version != b[i].Version || a[i].Serial != b[i].Serial ||
+			a[i].Row != b[i].Row || a[i].Col != b[i].Col ||
+			a[i].Cols != b[i].Cols || a[i].Rows != b[i].Rows || a[i].Z != b[i].Z {
+			return false
+		}
+	}
+	return true
 }
 
 // publishLatest replaces the single buffered watermark. Callers serialize
@@ -182,3 +248,17 @@ func (i *input) ScreenSize() (int, int, error) {
 }
 func (i *input) EnableMouse()  {}
 func (i *input) DisableMouse() {}
+
+// TerminalProbe makes the port a ttyapi.ProbeSource, so a producer inside a
+// viewport asking what terminal it is drawing on is answered about the
+// VIEWER's terminal rather than the process's own.
+//
+// Without this the answer came from the server's environment, which on
+// another node is not even the same machine: a nested desktop would ask
+// whether it may draw pictures, hear nothing, and fall back to cells for
+// good. The probe stays unanswered until a viewer fills it in, so cells
+// remain the default — a desktop drawn in cells is plain, one that spills
+// raster escapes onto a terminal that cannot show them is broken.
+func (p *port) TerminalProbe() *ttyapi.Probe { return p.session.probe }
+
+var _ ttyapi.ProbeSource = (*port)(nil)

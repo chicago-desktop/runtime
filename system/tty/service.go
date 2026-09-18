@@ -35,7 +35,12 @@ type session struct {
 	grant     string
 	handle    string
 	rows      []string
-	nextWatch uint64
+	probe     *ttyapi.Probe
+	// placements is the last complete set of pictures, every one of them
+	// carrying its image even when the frame that renewed it did not: a
+	// viewer attaching now must be able to draw the screen from this alone.
+	placements []ttyapi.Placement
+	nextWatch  uint64
 	revision  uint64
 	width     int
 	height    int
@@ -83,6 +88,12 @@ func (s *Service) Create(ctx context.Context, width, height int) (ttyapi.Viewpor
 	ss := &session{
 		service: s, grant: grant, handle: handle, width: width, height: height,
 		viewers: map[pid.PID]int{owner: 1}, watches: make(map[uint64]watch),
+		// A probe of its own, and deliberately not the process's: the
+		// terminal behind a viewport is the viewer's, which on another node
+		// is not even the same machine. It starts unanswered, so a producer
+		// draws in cells until a viewer says otherwise — the safe direction
+		// to be wrong in.
+		probe: ttyapi.NewProbe(nil),
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

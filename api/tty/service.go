@@ -40,10 +40,21 @@ type Snapshot struct {
 	// Rows is immutable and remains valid after later presents. Consumers must
 	// not modify it. This lets unchanged UI frames inspect snapshots without an
 	// allocation or copy.
-	Rows     []string
-	Revision uint64
-	Width    int
-	Height   int
+	Rows []string
+	// Placements is every picture standing on the screen, and it is complete
+	// rather than incremental: a viewer draws exactly these and nothing else,
+	// so a picture the producer stopped presenting is gone by being absent.
+	// That is the rule the physical surface already follows, and keeping it
+	// here means a nested compositor does not have to invent a second one.
+	//
+	// A producer may present a placement with no Image to say "the picture
+	// under this id has not changed". What a viewer reads always has the
+	// image filled in, because a viewer that attached late never saw the
+	// frame that carried it. Like Rows, the slice is immutable.
+	Placements []Placement
+	Revision   uint64
+	Width      int
+	Height     int
 }
 
 // Update announces that a newer snapshot may be read. Notifications are
@@ -65,6 +76,27 @@ type Viewport interface {
 	Resize(width, height int) error
 	// Close detaches this consumer. It never terminates the producer process.
 	Close() error
+}
+
+// ViewportTerminal is a viewport whose viewer can say which terminal the
+// producer is really drawing on.
+//
+// It is optional and separate from Viewport because it is the one thing a
+// viewport cannot work out for itself. The producer runs where the viewport
+// was made; the screen is wherever the viewer is, which may be another
+// machine. Nothing else in this package can cross that gap, so the viewer
+// has to say it.
+//
+// Say it BEFORE the producer starts. A producer decides how to draw when it
+// first asks, and a terminal described afterwards only takes effect the next
+// time it happens to ask again.
+type ViewportTerminal interface {
+	// SetTerminal records the viewer's graphics protocol (GraphicsNone,
+	// GraphicsKitty or GraphicsSixel) and the pixel size of one cell on that
+	// screen. A cell size of zero leaves the size unknown, which is honest
+	// when the viewer has not measured it; pictures then have no scale to be
+	// drawn at, so a producer that needs one falls back to cells.
+	SetTerminal(protocol string, cellWidth, cellHeight int) error
 }
 
 type Service interface {

@@ -51,7 +51,8 @@ func (v *viewport) Snapshot() ttyapi.Snapshot {
 		cursor = &copy
 	}
 	return ttyapi.Snapshot{Revision: v.session.revision, Width: v.session.width,
-		Height: v.session.height, Rows: v.session.rows, Cursor: cursor}
+		Height: v.session.height, Rows: v.session.rows, Cursor: cursor,
+		Placements: v.session.placements}
 }
 
 func (v *viewport) Send(event ttyapi.Event) error {
@@ -131,3 +132,33 @@ func sendEvent(router relay.Receiver, target pid.PID, event ttyapi.Event) error 
 	}
 	return nil
 }
+
+// SetTerminal implements ttyapi.ViewportTerminal: the viewer describes the
+// screen it is actually showing this viewport on, and the producer reads it
+// through the port's probe.
+//
+// The session is marked invalid rather than merely recorded. A producer told
+// only now that pictures are possible has already drawn a screen without
+// them, and the pictures it sends next would be measured against rows that
+// were never wrong — so the next frame has to be a whole one.
+func (v *viewport) SetTerminal(protocol string, cellWidth, cellHeight int) error {
+	if v.closed.Load() {
+		return ttyapi.ErrViewportClosed
+	}
+	switch protocol {
+	case ttyapi.GraphicsNone, ttyapi.GraphicsKitty, ttyapi.GraphicsSixel:
+	default:
+		return ttyapi.ErrInvalidGraphics
+	}
+	probe := v.session.probe
+	probe.SetGraphics(protocol, "reported by the viewport's viewer")
+	if cellWidth > 0 && cellHeight > 0 {
+		probe.SetCellSize(cellWidth, cellHeight)
+	}
+	v.session.mu.Lock()
+	v.session.invalid = true
+	v.session.mu.Unlock()
+	return nil
+}
+
+var _ ttyapi.ViewportTerminal = (*viewport)(nil)

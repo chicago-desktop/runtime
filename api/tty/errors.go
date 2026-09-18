@@ -12,4 +12,5 @@ var (
 	ErrSurfaceOpen         = errors.New("terminal surface already open")
 	ErrViewportClosed      = errors.New("viewport closed")
 	ErrInvalidViewportSize = errors.New("invalid terminal viewport size")
+	ErrInvalidGraphics     = errors.New("unknown terminal graphics protocol")
 )

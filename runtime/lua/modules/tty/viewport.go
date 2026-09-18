@@ -27,6 +27,7 @@ func init() {
 			"grant": viewportGrant, "handle": viewportHandle,
 			"snapshot": viewportSnapshot, "updates": viewportUpdates, "send": viewportSend,
 			"resize": viewportResize, "close": viewportClose,
+			"terminal": viewportTerminal,
 		})
 }
 
@@ -245,3 +246,58 @@ func viewportClose(l *lua.LState) int {
 }
 
 func viewportGC(l *lua.LState) int { _ = viewportClose(l); l.Pop(2); return 0 }
+
+// viewportTerminal is `view:terminal(protocol, cell_width?, cell_height?)`.
+//
+// The viewer says which screen it is really showing this viewport on. Only
+// the viewer can know: the producer runs where the viewport was made, and on
+// another node that is not even the same machine. Without it a nested
+// desktop asks whether it may draw pictures, hears nothing, and draws in
+// cells for good.
+//
+// Call it BEFORE starting the producer. A producer chooses how to draw the
+// first time it asks, and a terminal described afterwards only takes effect
+// the next time it asks again.
+func viewportTerminal(l *lua.LState) int {
+	v := checkViewport(l)
+	terminal, ok := v.view.(ttyapi.ViewportTerminal)
+	if !ok {
+		return invalidArgument(l, "this viewport cannot be told which terminal it is shown on")
+	}
+	protocol := l.CheckString(2)
+	cellWidth, cellHeight := 0, 0
+	if l.Get(3) != lua.LNil {
+		value, ok := integerArg(l.Get(3))
+		if !ok || value < 0 {
+			return invalidArgument(l, "cell_width must be a non-negative integer")
+		}
+		cellWidth = value
+	}
+	if l.Get(4) != lua.LNil {
+		value, ok := integerArg(l.Get(4))
+		if !ok || value < 0 {
+			return invalidArgument(l, "cell_height must be a non-negative integer")
+		}
+		cellHeight = value
+	}
+	if err := terminal.SetTerminal(protocol, cellWidth, cellHeight); err != nil {
+		l.Push(lua.LNil)
+		l.Push(lua.WrapErrorWithLua(l, err, "describe the viewport's terminal"))
+		return 2
+	}
+	l.Push(lua.LTrue)
+	l.Push(lua.LNil)
+	return 2
+}
+
+func integerArg(v lua.LValue) (int, bool) {
+	number, ok := v.(lua.LNumber)
+	if !ok {
+		return 0, false
+	}
+	whole := int(number)
+	if lua.LNumber(whole) != number {
+		return 0, false
+	}
+	return whole, true
+}
