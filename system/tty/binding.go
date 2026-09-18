@@ -79,3 +79,20 @@ func (b *binding) Close() error {
 }
 
 func (b *binding) Rollback() error { return b.Close() }
+
+// TerminalProbe makes an unredeemed binding answer about the terminal as its
+// port would.
+//
+// A process is admitted with a BINDING in its frame, and the port only comes
+// into being when the process first asks for it. Anything that reads the
+// probe before that — and a producer deciding whether it may draw pictures
+// asks very early — found a value that was not a ProbeSource and fell back to
+// the probe of the process, which describes the machine the producer runs on
+// rather than the screen it is drawn on. On another node those are not even
+// the same computer.
+//
+// Answering here costs nothing and redeems nothing: the grant stays where it
+// is, which is what ProbeFromContext promises.
+func (b *binding) TerminalProbe() *ttyapi.Probe { return b.session.probe }
+
+var _ ttyapi.ProbeSource = (*binding)(nil)

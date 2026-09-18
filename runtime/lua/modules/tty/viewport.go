@@ -291,14 +291,14 @@ func viewportTerminal(l *lua.LState) int {
 	protocol := l.CheckString(2)
 	cellWidth, cellHeight := 0, 0
 	if l.Get(3) != lua.LNil {
-		value, ok := integerArg(l.Get(3))
+		value, ok := integerValue(l.Get(3))
 		if !ok || value < 0 {
 			return invalidArgument(l, "cell_width must be a non-negative integer")
 		}
 		cellWidth = value
 	}
 	if l.Get(4) != lua.LNil {
-		value, ok := integerArg(l.Get(4))
+		value, ok := integerValue(l.Get(4))
 		if !ok || value < 0 {
 			return invalidArgument(l, "cell_height must be a non-negative integer")
 		}
@@ -312,16 +312,4 @@ func viewportTerminal(l *lua.LState) int {
 	l.Push(lua.LTrue)
 	l.Push(lua.LNil)
 	return 2
-}
-
-func integerArg(v lua.LValue) (int, bool) {
-	number, ok := v.(lua.LNumber)
-	if !ok {
-		return 0, false
-	}
-	whole := int(number)
-	if lua.LNumber(whole) != number {
-		return 0, false
-	}
-	return whole, true
 }

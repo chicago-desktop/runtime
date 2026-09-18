@@ -532,3 +532,43 @@ func BenchmarkVirtualSurfacePresentUnchanged(b *testing.B) {
 		_, _ = surface.Present(ttyapi.Frame{Rows: rows})
 	}
 }
+
+// A producer decides whether it may draw pictures very early — before it has
+// asked for its port, and therefore while its frame still holds the binding.
+// If the binding cannot answer about the terminal, the answer comes from the
+// process instead: the machine the producer runs on, which for a viewer on
+// another node is not even the same computer. The desktop then draws itself
+// in cells forever and says the terminal never reported a cell size.
+func TestUnredeemedBindingAnswersAboutTheViewersTerminal(t *testing.T) {
+	service := NewService()
+	defer service.Close()
+	ctx, frame, _ := processContext(t, service)
+	defer frame.Close()
+
+	view, err := service.Create(ctx, 40, 12)
+	require.NoError(t, err)
+	terminal, ok := view.(ttyapi.ViewportTerminal)
+	require.True(t, ok, "a viewport can be told which terminal it is shown on")
+	require.NoError(t, terminal.SetTerminal(ttyapi.GraphicsSixel, 8, 20))
+
+	binding, err := service.Binding(view.Grant())
+	require.NoError(t, err)
+
+	source, ok := binding.(ttyapi.ProbeSource)
+	require.True(t, ok, "an unredeemed binding answers about the terminal")
+	probe := source.TerminalProbe()
+	require.NotNil(t, probe)
+
+	protocol, _ := probe.Detect()
+	require.Equal(t, ttyapi.GraphicsSixel, protocol, "the viewer's protocol, not the process's")
+	width, height, known := probe.CellSize()
+	require.True(t, known, "and the viewer's cell size")
+	require.Equal(t, 8, width)
+	require.Equal(t, 20, height)
+
+	// Answering must not redeem the grant: the port is still the producer's
+	// to take, once.
+	port, err := binding.Resolve(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, port)
+}

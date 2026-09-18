@@ -194,6 +194,17 @@ var viewportSnapshotType = typ.NewRecord().
 		ReadonlyField("y", typ.Integer).
 		ReadonlyField("visible", typ.Boolean).
 		Build()).
+	OptReadonlyField("images", typ.NewArray(typ.NewRecord().
+		ReadonlyField("id", typ.String).
+		ReadonlyField("x", typ.Integer).
+		ReadonlyField("y", typ.Integer).
+		ReadonlyField("cols", typ.Integer).
+		ReadonlyField("rows", typ.Integer).
+		ReadonlyField("z", typ.Integer).
+		ReadonlyField("version", typ.Integer).
+		ReadonlyField("serial", typ.Integer).
+		ReadonlyField("raster", typ.Any).
+		Build())).
 	Build()
 
 var viewportType = typ.NewInterface("tty.Viewport", []typ.Method{
@@ -203,6 +214,9 @@ var viewportType = typ.NewInterface("tty.Viewport", []typ.Method{
 	{Name: "updates", Type: typ.Func().Param("self", typ.Self).Returns(viewportUpdateChannelType, typ.NewOptional(typ.LuaError)).Build()},
 	{Name: "send", Type: typ.Func().Param("self", typ.Self).Param("event", ttyEventType).Returns(typ.Boolean, typ.NewOptional(typ.LuaError)).Build()},
 	{Name: "resize", Type: typ.Func().Param("self", typ.Self).Param("width", typ.Integer).Param("height", typ.Integer).Returns(typ.Boolean, typ.NewOptional(typ.LuaError)).Build()},
+	{Name: "terminal", Type: typ.Func().Param("self", typ.Self).Param("protocol", typ.String).
+		OptParam("cell_width", typ.Integer).OptParam("cell_height", typ.Integer).
+		Returns(typ.Boolean, typ.NewOptional(typ.LuaError)).Build()},
 	{Name: "close", Type: typ.Func().Param("self", typ.Self).Returns(typ.Boolean, typ.NewOptional(typ.LuaError)).Build()},
 })
 
