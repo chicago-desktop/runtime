@@ -346,18 +346,22 @@ func rasterEncode(l *lua.LState) int {
 // identity here, as newRaster does, would make every picture look new on
 // every frame, and the pixels would be sent again each time.
 //
-// An image that is not already RGBA is copied into one, because that is the
-// only buffer this type owns.
+// The pixels are COPIED, always, and that is not caution about the format.
+//
+// What is adopted here belongs to a producer that is still running and still
+// drawing into it. A surface that encodes a placement inside the same
+// Present, as the physical one does, can share the buffer safely: nothing
+// moves in between. A reader that carries the picture somewhere else encodes
+// it later, and by then the producer may have cleared that buffer for its
+// next frame — and since the identity still says "unchanged", the blank is
+// never sent again. A window arrives as a white rectangle and stays one.
 func Adopt(img image.Image, version, serial uint64) *Raster {
 	if img == nil {
 		return nil
 	}
-	rgba, ok := img.(*image.RGBA)
-	if !ok {
-		bounds := img.Bounds()
-		rgba = image.NewRGBA(bounds)
-		draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
-	}
+	bounds := img.Bounds()
+	rgba := image.NewRGBA(bounds)
+	draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
 	return &Raster{img: rgba, version: version, serial: serial}
 }
 
