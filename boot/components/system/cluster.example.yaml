@@ -9,30 +9,73 @@
 # list to enumerate and no "new vs existing" state to flip by hand.
 #
 # Three topologies are shown below; use one.
+#
+# Every clustered node needs, or the boot fails:
+#   - a shared gossip key: membership.secret_key or secret_file, base64 of
+#     16, 24 or 32 random bytes, the same on every node
+#       openssl rand -base64 32 > gossip.key
+#   - its own Ed25519 identity: internode.identity_key or identity_key_file,
+#     base64 of a 32-byte seed (or a 64-byte private key)
+#       openssl genpkey -algorithm ed25519 -out node.pem
+#       openssl pkey -in node.pem -outform DER | tail -c 32 | base64 > node.key
+#       openssl pkey -in node.pem -pubout -outform DER | tail -c 32 | base64 > node.pub
+#   - internode.trusted_peer_keys: node name -> base64 public key, for every
+#     peer AND for the node itself (its entry must match its identity).
+#
+# relay.node_name must equal cluster.name. Raft and PIDs use the relay node
+# id, gossip and the voter reconciler use cluster.name, and the relay id
+# otherwise defaults to a UUID. Several nodes then fail to bootstrap with
+# "raft bootstrap: node is not a voter"; a single node bootstraps under the
+# UUID, the reconciler adds its gossip name as a second voter nobody answers
+# for, and the node loses leadership within seconds. WIPPY_NODE_ID sets the
+# relay id too.
+#
+# Several nodes on one host: pin membership.bind_port and
+# internode.bind_port per node and set internode.auto_port: false. auto_port
+# probes a free port at load and binds it again at start, so nodes starting
+# together pick the same port and the later one fails with "address already
+# in use". Give each node its own raft.data_dir (default ~/.wippy/store).
 
 # ---------------------------------------------------------------------------
 # 1. Single node (development). Cluster enabled with no peers: the one node
 #    bootstraps itself immediately (bootstrap_expect defaults to 1).
 # ---------------------------------------------------------------------------
+relay:
+  node_name: "dev-1"       # must equal cluster.name
 cluster:
   enabled: true
   name: "dev-1"            # stable per-node id; must be unique across the cluster
+  membership:
+    secret_file: "./cluster/gossip.key"
+  internode:
+    identity_key_file: "./cluster/dev-1.key"
+    trusted_peer_keys:
+      dev-1: "<base64 public key of dev-1.key>"
 
 # ---------------------------------------------------------------------------
 # 2. Three-server cluster (all nodes are raft voters). Every node ships the
 #    same join_addrs and bootstrap_expect: 3. Quorum forms once all three are
 #    visible in gossip. This is the simplest production shape.
 # ---------------------------------------------------------------------------
+relay:
+  node_name: "${POD_NAME}" # must equal cluster.name
 cluster:
   enabled: true
   name: "${POD_NAME}"      # e.g. injected per node
   membership:
     join_addrs: "node-0:7946,node-1:7946,node-2:7946"  # gossip seeds (any subset works)
-    # secret_key / secret_file: shared gossip encryption key. Nodes with
-    # different keys never see each other, so this also scopes the cluster.
+    # Shared gossip encryption key (required). Nodes with different keys
+    # never see each other, so this also scopes the cluster.
+    secret_file: "/etc/wippy/gossip.key"
     # gossip_interval: 500ms       # UDP gossip cadence; lower is faster but noisier.
     # push_pull_interval: 5s       # TCP full-state anti-entropy cadence.
     # dead_node_reclaim_time: 30s  # same-name/different-address reclaim after hard death.
+  internode:
+    identity_key_file: "/etc/wippy/node.key"  # this node's own Ed25519 seed
+    trusted_peer_keys:                        # the same map on every node
+      node-0: "<base64 public key>"
+      node-1: "<base64 public key>"
+      node-2: "<base64 public key>"
   raft:
     bootstrap_expect: 3    # size of the initial voter quorum
 
@@ -42,6 +85,8 @@ cluster:
 #    clients route names over gossip + the dissemination plane with no raft
 #    Node. Pick the role per node — e.g. by StatefulSet ordinal.
 # ---------------------------------------------------------------------------
+relay:
+  node_name: "${POD_NAME}"    # must equal cluster.name
 cluster:
   enabled: true
   name: "${POD_NAME}"
@@ -50,6 +95,11 @@ cluster:
     join_addrs: "node-0:7946,node-1:7946,node-2:7946"
     secret_key: "${GOSSIP_SECRET}"
     # dead_node_reclaim_time: 30s # set lower, e.g. 3s, only when same-name pod IP reuse is expected and false-dead probes are rare.
+  internode:
+    identity_key: "${NODE_IDENTITY_KEY}"
+    trusted_peer_keys:        # every server and client node, by name
+      node-0: "<base64 public key>"
+      # ...
   raft:
     role: server              # "server" (default) runs raft; "client" is gossip-only
     bootstrap_expect: 5       # initial server quorum (set on the server nodes)
