@@ -719,9 +719,25 @@ func (t *Topology) HandleNodeExit(nodeID pid.NodeID, exitErr error) {
 		}
 	}
 
+	// A watcher and a linked process learn of the same death in different
+	// words, and the difference is the whole point of having both.
+	//
+	// A monitor observes: it is told Exit and goes on living. A link ties two
+	// lifetimes together: it is told LinkDown, and a process that has not
+	// asked to trap that will be taken down with its partner. That is what
+	// Complete does when a process dies on a live node, and a node dying is
+	// not a reason to say something else.
+	//
+	// Sending LinkDown to watchers as well — as this did — killed processes
+	// that had only ever asked to be told. A window watching a session on
+	// another node vanished the moment gossip reported the node gone,
+	// without a traceback, because the engine fails the step before any Lua
+	// runs. Monitoring a remote pid was a hidden way to tie your life to
+	// another machine's.
 	type notification struct {
 		caller pid.PID
 		target pid.PID
+		kind   topology.Kind
 	}
 	var toNotify []notification
 
@@ -732,12 +748,12 @@ func (t *Topology) HandleNodeExit(nodeID pid.NodeID, exitErr error) {
 		for _, state := range sh.processes {
 			for targetKey, targetPID := range state.watching {
 				if deadKeySet[targetKey] || targetPID.Node == nodeID {
-					toNotify = append(toNotify, notification{state.pid, targetPID})
+					toNotify = append(toNotify, notification{state.pid, targetPID, topology.Exit})
 				}
 			}
 			for linkedKey, linkedPID := range state.links {
 				if deadKeySet[linkedKey] || linkedPID.Node == nodeID {
-					toNotify = append(toNotify, notification{state.pid, linkedPID})
+					toNotify = append(toNotify, notification{state.pid, linkedPID, topology.LinkDown})
 				}
 			}
 		}
@@ -746,15 +762,15 @@ func (t *Topology) HandleNodeExit(nodeID pid.NodeID, exitErr error) {
 
 	// Send notifications
 	for _, n := range toNotify {
-		linkDownPayload := payload.New(&topology.ExitEvent{
+		exitPayload := payload.New(&topology.ExitEvent{
 			At:   time.Now(),
 			From: n.target,
-			Kind: topology.LinkDown,
+			Kind: n.kind,
 			Result: &runtime.Result{
 				Error: exitErr,
 			},
 		})
-		pkg := relay.NewPackage(topology.SystemPID, n.caller, topology.TopicEvents, linkDownPayload)
+		pkg := relay.NewPackage(topology.SystemPID, n.caller, topology.TopicEvents, exitPayload)
 		_ = t.router.Send(pkg)
 	}
 

@@ -523,7 +523,7 @@ func TestTopology_HandleNodeExit(t *testing.T) {
 		topo.HandleNodeExit("remote", errors.New("node disconnected"))
 
 		pkgs := router.getSends(localPID1)
-		require.Len(t, pkgs, 1, "should send LinkDown to local watcher")
+		require.Len(t, pkgs, 1, "should send Exit to local watcher")
 
 		var exitEvent *topology.ExitEvent
 		for _, msg := range pkgs[0].Messages {
@@ -536,7 +536,12 @@ func TestTopology_HandleNodeExit(t *testing.T) {
 		}
 
 		require.NotNil(t, exitEvent)
-		assert.Equal(t, topology.LinkDown, exitEvent.Kind)
+		// A watcher is told Exit, exactly as it would be for a process that
+		// died on a live node. LinkDown here would be a death sentence: an
+		// engine that has not been asked to trap links takes the process
+		// down when it sees one, so a process that only ever asked to be
+		// told about another machine would die with it.
+		assert.Equal(t, topology.Exit, exitEvent.Kind)
 		assert.Equal(t, remotePID1, exitEvent.From)
 	})
 
