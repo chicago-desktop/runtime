@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"image"
+	"image/draw"
 	"image/color"
 	"image/png"
 	"math"
@@ -334,4 +335,37 @@ func rasterEncode(l *lua.LState) int {
 	}
 	l.Push(lua.LString(buf.String()))
 	return 1
+}
+
+// Adopt wraps pixels that arrived from somewhere else — a placement read back
+// out of a viewport, for instance — keeping the identity they came with.
+//
+// The identity is the point. A picture crossing a boundary is recognised by
+// its serial and version, not by its pixels: that pair is what lets a viewer
+// say "I already have this one" and a sender skip the bytes. Minting a fresh
+// identity here, as newRaster does, would make every picture look new on
+// every frame, and the pixels would be sent again each time.
+//
+// An image that is not already RGBA is copied into one, because that is the
+// only buffer this type owns.
+func Adopt(img image.Image, version, serial uint64) *Raster {
+	if img == nil {
+		return nil
+	}
+	rgba, ok := img.(*image.RGBA)
+	if !ok {
+		bounds := img.Bounds()
+		rgba = image.NewRGBA(bounds)
+		draw.Draw(rgba, bounds, img, bounds.Min, draw.Src)
+	}
+	return &Raster{img: rgba, version: version, serial: serial}
+}
+
+// PushRaster puts a raster on the stack as the userdata Lua knows.
+func PushRaster(l *lua.LState, raster *Raster) {
+	if raster == nil {
+		l.Push(lua.LNil)
+		return
+	}
+	value.PushTypedUserData(l, raster, rasterTypeName)
 }

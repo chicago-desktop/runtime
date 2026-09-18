@@ -4,6 +4,7 @@ package tty
 
 import (
 	"fmt"
+	"github.com/wippyai/runtime/runtime/lua/modules/gfx"
 	"sync"
 
 	lua "github.com/wippyai/go-lua"
@@ -159,6 +160,29 @@ func viewportSnapshot(l *lua.LState) int {
 	result.RawSetString("width", lua.LInteger(s.Width))
 	result.RawSetString("height", lua.LInteger(s.Height))
 	result.RawSetString("rows", rows)
+	// The pictures standing on the screen, with the identity each arrived
+	// with: a viewer that carries them somewhere else recognises a picture by
+	// its serial and version, and sends the pixels only for one it has not
+	// seen. Coordinates are one-based here, as everything Lua-facing is.
+	if len(s.Placements) > 0 {
+		images := l.CreateTable(len(s.Placements), 0)
+		for i, placement := range s.Placements {
+			entry := l.CreateTable(0, 8)
+			entry.RawSetString("id", lua.LString(placement.ID))
+			entry.RawSetString("x", lua.LInteger(placement.Col))
+			entry.RawSetString("y", lua.LInteger(placement.Row))
+			entry.RawSetString("cols", lua.LInteger(placement.Cols))
+			entry.RawSetString("rows", lua.LInteger(placement.Rows))
+			entry.RawSetString("z", lua.LInteger(placement.Z))
+			entry.RawSetString("version", lua.LInteger(int(placement.Version)))
+			entry.RawSetString("serial", lua.LInteger(int(placement.Serial)))
+			gfx.PushRaster(l, gfx.Adopt(placement.Image, placement.Version, placement.Serial))
+			entry.RawSetString("raster", l.Get(-1))
+			l.Pop(1)
+			images.RawSetInt(i+1, entry)
+		}
+		result.RawSetString("images", images)
+	}
 	if s.Cursor != nil {
 		cursor := l.CreateTable(0, 3)
 		cursor.RawSetString("x", lua.LInteger(s.Cursor.Column+1))

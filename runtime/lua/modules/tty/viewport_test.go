@@ -5,6 +5,7 @@ package tty
 import (
 	"context"
 	"errors"
+	"image"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,44 @@ func TestLuaViewportClosePreservesFailure(t *testing.T) {
 		end
 	`))
 	require.True(t, created.closed)
+}
+
+// A viewport carries the pictures standing on the screen, and a picture must
+// arrive with the identity it had: a viewer somewhere else recognises it by
+// its serial and version, and sends the pixels only for one it has not seen.
+// Minting a fresh identity here would make every picture look new on every
+// frame, and the pixels would travel again each time — invisible locally,
+// ruinous over a network.
+func TestLuaViewportSnapshotCarriesPictures(t *testing.T) {
+	picture := image.NewRGBA(image.Rect(0, 0, 4, 2))
+	view := &viewportTestView{
+		grant: "producer", handle: "viewer",
+		snapshot: ttyapi.Snapshot{
+			Revision: 3, Width: 20, Height: 5, Rows: []string{"under"},
+			Placements: []ttyapi.Placement{{
+				Image: picture, ID: "wallpaper", Version: 9, Serial: 41,
+				Row: 2, Col: 3, Cols: 4, Rows: 2, Z: 1,
+			}},
+		},
+	}
+	service := &viewportTestService{created: view, attached: view}
+	ctx := ttyapi.WithService(ctxapi.NewRootContext(), service)
+
+	l := lua.NewState()
+	defer l.Close()
+	bindTTY(l)
+	l.SetContext(ctx)
+	require.NoError(t, l.DoString(`
+		local view = assert(tty.viewport({width = 20, height = 5}))
+		local shot = view:snapshot()
+		assert(shot.images ~= nil, "a snapshot carries the pictures")
+		assert(#shot.images == 1, "one picture")
+		local one = shot.images[1]
+		assert(one.id == "wallpaper", "named")
+		assert(one.x == 3 and one.y == 2, "placed where the producer put it")
+		assert(one.cols == 4 and one.rows == 2, "as many cells as it covers")
+		assert(one.version == 9 and one.serial == 41, "with the identity it arrived with")
+		local w, h = one.raster:size()
+		assert(w == 4 and h == 2, "and its pixels")
+	`))
 }
